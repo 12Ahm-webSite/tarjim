@@ -1,6 +1,17 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Runtime font download (google_fonts) + ML Kit model download fallback. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Draw the translation overlay above other apps (Mihon). -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- Foreground service required while capturing the screen. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- MediaProjection-type foreground service (Android 10+). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- Foreground-service notification visibility (Android 13+). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
-        android:label="tarjim"
+        android:label="Tarjim"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
@@ -25,6 +36,17 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- Holds the MediaProjection session (Step 6 wires the logic). -->
+        <service
+            android:name=".services.MediaProjectionService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <!-- Hosts the translation overlay window above other apps (Step 9). -->
+        <service
+            android:name=".services.OverlayService"
+            android:exported="false" />
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
