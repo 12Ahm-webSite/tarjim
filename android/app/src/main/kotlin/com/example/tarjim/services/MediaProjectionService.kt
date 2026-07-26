@@ -21,29 +21,12 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import com.example.tarjim.managers.ScreenCaptureManager
 import java.io.ByteArrayOutputStream
 
 /**
  * Foreground service that owns the MediaProjection session.
- *
- * Flow (single-shot MVP):
- * 1. Started with the consent token (resultCode + data Intent).
- * 2. Calls startForeground(mediaProjection type) — mandatory before
- *    createVirtualDisplay() on Android 14+.
- * 3. Creates a VirtualDisplay backed by an ImageReader.
- * 4. First available frame → PNG bytes → answered to Flutter via
- *    [ScreenCaptureManager] → everything is torn down.
- *
- * Fail-safe mechanisms:
- * - [frameDelivered] guard ensures exactly one result is delivered even
- *   if ImageReader surfaces several frames in quick succession.
- * - [timeoutRunnable] fires after [CAPTURE_TIMEOUT_MS] if no frame ever
- *   arrives (DRM-protected content, OEM secure-flagged windows, or a
- *   silent VirtualDisplay failure).
- *
- * The foreground notification is required the whole time the
- * projection lives; it disappears with the service.
  */
 class MediaProjectionService : Service() {
 
@@ -113,7 +96,7 @@ class MediaProjectionService : Service() {
             }
         }
         projectionCallback = callback
-        projection.registerCallback(callback, handler)
+        projection?.registerCallback(callback, handler)
 
         val metrics = resources.displayMetrics
         val width = metrics.widthPixels
@@ -126,165 +109,135 @@ class MediaProjectionService : Service() {
 
         val listener = ImageReader.OnImageAvailableListener { r ->
             if (frameDelivered) {
-                // Single-shot semantics: ignore any frames after the first.
                 val stray = r.acquireLatestImage()
                 stray?.close()
                 return@OnImageAvailableListener
             }
-
-            val image = r.acquireLatestImage()
-            if (image == null) {
-                Log.w(TAG, "OnImageAvailableListener fired but acquireLatestImage returned null")
-                return@OnImageAvailableListener
-            }
-
-            handler.removeCallbacks(timeoutRunnable)
             try {
-                val bytes = imageToPngBytes(image, width, height)
+                val image = r.acquireLatestImage() ?: return@OnImageAvailableListener
                 frameDelivered = true
-                ScreenCaptureManager.deliverCapture(bytes)
-                Log.d(TAG, "Delivered single capture frame (${bytes.size} bytes)")
+                handler.removeCallbacks(timeoutRunnable)
+                processImageAndDeliver(image)
             } catch (e: Exception) {
-                Log.e(TAG, "Frame encode failed", e)
-                deliverErrorOnce("ENCODE_FAILED", e.message)
-            } finally {
-                image.close()
+                Log.e(TAG, "Failed to process image frame", e)
+                deliverErrorOnce("FRAME_ERROR", e.message)
+                stopSelf()
             }
-            stopSelf()
         }
         imageListener = listener
         reader.setOnImageAvailableListener(listener, handler)
 
-        virtualDisplay = projection.createVirtualDisplay(
-            "tarjim_capture",
+        // Added safe calls (?.) to mediaProjection to fix the compilation error
+        virtualDisplay = mediaProjection?.createVirtualDisplay(
+            "ScreenCapture",
             width, height, dpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            reader.surface, null, handler,
+            reader.surface, null, handler
         )
 
         handler.postDelayed(timeoutRunnable, CAPTURE_TIMEOUT_MS)
-        Log.d(TAG, "Capture timeout armed: ${CAPTURE_TIMEOUT_MS}ms")
     }
 
-    /** RGBA ImageReader frame → cropped PNG bytes (handles row padding). */
-    private fun imageToPngBytes(image: Image, width: Int, height: Int): ByteArray {
-        val plane = image.planes[0]
-        val pixelStride = plane.pixelStride
-        val rowStride = plane.rowStride
-        val rowPadding = rowStride - pixelStride * width
+    private fun processImageAndDeliver(image: Image) {
+        try {
+            val planes = image.planes
+            val buffer = planes[0].buffer
+            val pixelStride = planes[0].pixelStride
+            val rowStride = planes[0].rowStride
+            val rowPadding = rowStride - pixelStride * image.width
 
-        val padded = Bitmap.createBitmap(
-            width + rowPadding / pixelStride, height, Bitmap.Config.ARGB_8888,
-        )
-        padded.copyPixelsFromBuffer(plane.buffer)
+            val bitmap = Bitmap.createBitmap(
+                image.width + rowPadding / pixelStride,
+                image.height,
+                Bitmap.Config.ARGB_8888
+            )
+            bitmap.copyPixelsFromBuffer(buffer)
+            image.close()
 
-        val cropped = Bitmap.createBitmap(padded, 0, 0, width, height)
-        padded.recycle()
+            val cleanBitmap = Bitmap.createBitmap(bitmap, 0, 0, image.width, image.height)
+            bitmap.recycle()
 
-        val out = ByteArrayOutputStream()
-        cropped.compress(Bitmap.CompressFormat.PNG, 100, out)
-        cropped.recycle()
-        return out.toByteArray()
+            val stream = ByteArrayOutputStream()
+            cleanBitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
+            val byteArray = stream.toByteArray()
+            cleanBitmap.recycle()
+
+            ScreenCaptureManager.deliverResult(byteArray)
+        } catch (e: Exception) {
+            image.close()
+            throw e
+        } finally {
+            stopSelf()
+        }
     }
-
-    /** Thread-safe error forwarder that honours the single-shot promise. */
-    @Synchronized
-    private fun deliverErrorOnce(code: String, message: String?) {
-        if (frameDelivered) return
-        frameDelivered = true
-        handler.removeCallbacks(timeoutRunnable)
-        ScreenCaptureManager.deliverError(code, message)
-    }
-
-    // ─── Foreground requirement ────────────────────────────────────
 
     private fun startForegroundWithNotification() {
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
-                CHANNEL_ID, "Screen capture", NotificationManager.IMPORTANCE_LOW,
+                NOTIF_CHANNEL_ID,
+                "Screen Capture Service",
+                NotificationManager.IMPORTANCE_LOW
             )
-            getSystemService(NotificationManager::class.java)
-                .createNotificationChannel(channel)
+            manager.createNotificationChannel(channel)
         }
 
-        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, CHANNEL_ID)
-        } else {
-            @Suppress("DEPRECATION") Notification.Builder(this)
-        }
-        val notification = builder
-            .setContentTitle("Tarjim")
-            .setContentText("Capturing the screen…")
-            .setSmallIcon(applicationInfo.icon)
+        val notification: Notification = NotificationCompat.Builder(this, NOTIF_CHANNEL_ID)
+            .setContentTitle("Screen Translation Active")
+            .setContentText("Capturing screen for translation...")
+            .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setOngoing(true)
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
-                NOTIFICATION_ID, notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
             )
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
     }
 
-    // ─── Teardown ──────────────────────────────────────────────────
+    private fun deliverErrorOnce(code: String, message: String?) {
+        if (!frameDelivered) {
+            ScreenCaptureManager.deliverError(code, message ?: "Unknown error")
+        }
+    }
 
-    @Synchronized
     private fun cleanup() {
         if (cleanedUp) return
         cleanedUp = true
         handler.removeCallbacks(timeoutRunnable)
-
-        val reader = imageReader
-        if (reader != null && imageListener != null) {
-            try {
-                reader.setOnImageAvailableListener(null, null)
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to clear ImageReader listener", e)
-            }
-        }
-        imageListener = null
-
-        virtualDisplay?.release()
-        virtualDisplay = null
-        imageReader?.close()
-        imageReader = null
-
-        val proj = mediaProjection
-        val cb = projectionCallback
-        if (proj != null && cb != null) {
-            try {
-                proj.unregisterCallback(cb)
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to unregister projection callback", e)
-            }
-        }
-        projectionCallback = null
+        
         try {
+            virtualDisplay?.release()
+            imageReader?.setOnImageAvailableListener(null, null)
+            imageReader?.close()
+            
+            // Added safe call (?.) to mediaProjection here as well
+            if (projectionCallback != null) {
+                mediaProjection?.unregisterCallback(projectionCallback!!)
+            }
             mediaProjection?.stop()
-        } catch (e: IllegalStateException) {
-            Log.w(TAG, "Projection already stopped")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during resource cleanup", e)
         }
-        mediaProjection = null
     }
 
     override fun onDestroy() {
         cleanup()
-        Log.d(TAG, "Service destroyed (frameDelivered=$frameDelivered)")
         super.onDestroy()
     }
 
     companion object {
-        private const val TAG = "MediaProjectionSvc"
-        private const val CHANNEL_ID = "tarjim_capture"
-        private const val NOTIFICATION_ID = 1001
-
-        /** Maximum wait time (ms) for the first frame before giving up. */
+        private const val TAG = "MediaProjectionService"
+        private const val NOTIFICATION_ID = 101
+        private const val NOTIF_CHANNEL_ID = "tarjim_capture_channel"
         private const val CAPTURE_TIMEOUT_MS = 5000L
 
-        const val EXTRA_RESULT_CODE = "com.example.tarjim.extra.RESULT_CODE"
-        const val EXTRA_DATA = "com.example.tarjim.extra.RESULT_DATA"
+        const val EXTRA_RESULT_CODE = "EXTRA_RESULT_CODE"
+        const val EXTRA_DATA = "EXTRA_DATA"
     }
 }

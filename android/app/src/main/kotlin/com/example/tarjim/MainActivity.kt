@@ -4,7 +4,9 @@ import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Bundle
 import android.util.Log
+import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import com.example.tarjim.channels.MethodChannelHandler
 import com.example.tarjim.managers.ScreenCaptureManager
@@ -15,20 +17,22 @@ import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
 
-    /**
-     * Launches the system MediaProjection consent dialog and forwards
-     * the outcome. Granted → the foreground service receives the token;
-     * denied → the parked Flutter call is answered with DENIED.
-     */
-    private val screenCaptureConsent = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult(),
-    ) { result ->
-        if (result.resultCode == RESULT_OK && result.data != null) {
-            startCaptureService(result.resultCode, result.data!!)
-        } else {
-            ScreenCaptureManager.deliverError(
-                "DENIED", "Screen capture consent denied.",
-            )
+    private lateinit var screenCaptureConsent: ActivityResultLauncher<Intent>
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        
+        // Initialize the launcher safely inside onCreate to prevent compilation and lifecycle errors
+        screenCaptureConsent = registerForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+            if (result.resultCode == RESULT_OK && result.data != null) {
+                startCaptureService(result.resultCode, result.data!!)
+            } else {
+                ScreenCaptureManager.deliverError(
+                    "DENIED", "Screen capture consent denied."
+                )
+            }
         }
     }
 
