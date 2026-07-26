@@ -11,18 +11,17 @@ import androidx.activity.result.contract.ActivityResultContracts
 import com.example.tarjim.channels.MethodChannelHandler
 import com.example.tarjim.managers.ScreenCaptureManager
 import com.example.tarjim.services.MediaProjectionService
-import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
-class MainActivity : FlutterActivity() {
+class MainActivity : FlutterFragmentActivity() {
 
     private lateinit var screenCaptureConsent: ActivityResultLauncher<Intent>
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        // Initialize the launcher safely inside onCreate to prevent compilation and lifecycle errors
         screenCaptureConsent = registerForActivityResult(
             ActivityResultContracts.StartActivityForResult()
         ) { result ->
@@ -47,11 +46,6 @@ class MainActivity : FlutterActivity() {
         Log.d(TAG, "MethodChannel registered: $CHANNEL")
     }
 
-    /**
-     * Entry point for the channel's startScreenCapture call. Parks the
-     * Flutter result, then shows the system consent dialog. The call is
-     * answered later — with PNG bytes or an error.
-     */
     private fun launchScreenCaptureConsent(flutterResult: MethodChannel.Result) {
         if (!ScreenCaptureManager.holdResult(flutterResult)) {
             flutterResult.error(
@@ -77,8 +71,6 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private const val TAG = "MainActivity"
-
-        /** Must match AppConstants.methodChannelName on the Flutter side. */
         private const val CHANNEL = "com.example.tarjim/core"
     }
 }
