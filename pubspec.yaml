@@ -39,6 +39,7 @@ dependencies:
   google_mlkit_translation: ^0.14.0
   flutter_overlay_window: ^0.5.0
   google_fonts: ^6.3.2
+  flutter_svg: ^2.0.8
 
 dev_dependencies:
   flutter_test:
@@ -61,6 +62,9 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+  assets:
+    - assets/images/tarjimLogo.svg
+    - assets/images/tarjimLogo.png
 
   # To add assets to your application, add an assets section, like this:
   # assets:

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 import '../controllers/app_controller.dart';
 import '../core/constants/app_constants.dart';
@@ -19,31 +20,42 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   late final AppController _controller;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _controller = AppController()..addListener(_onControllerChanged);
+    _controller.refreshStatuses();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _controller
       ..removeListener(_onControllerChanged)
       ..dispose();
     super.dispose();
   }
 
+  /// Cards re-sync with real native state whenever the app resumes —
+  /// e.g. after returning from the overlay permission settings screen.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _controller.refreshStatuses();
+    }
+  }
+
   void _onControllerChanged() => setState(() {});
 
-  void _onStartPressed() {
-    _controller.startTranslation();
+  Future<void> _onStartPressed() async {
+    final error = await _controller.startTranslation();
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('UI state active — screen capture connects in Step 6.'),
-      ),
+      SnackBar(content: Text(error ?? 'Translation pipeline started.')),
     );
   }
 
@@ -121,16 +133,16 @@ class _HomeScreenState extends State<HomeScreen> {
             AppButton(
               label: 'Start Translation',
               icon: Icons.play_arrow_rounded,
-              onPressed:
-                  _controller.isTranslating ? null : _onStartPressed,
+              onPressed: _controller.isTranslating ? null : _onStartPressed,
             ),
             const SizedBox(height: 12),
             AppButton(
               label: 'Stop Translation',
               icon: Icons.stop_rounded,
               variant: AppButtonVariant.danger,
-              onPressed:
-                  _controller.isTranslating ? _controller.stopTranslation : null,
+              onPressed: _controller.isTranslating
+                  ? _controller.stopTranslation
+                  : null,
             ),
             const SizedBox(height: 12),
             AppButton(
@@ -169,16 +181,30 @@ class _HeroHeader extends StatelessWidget {
         Row(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            Text(AppConstants.appName, style: theme.textTheme.headlineLarge),
+            SvgPicture.asset(
+              'assets/images/tarjimLogo.svg',
+              width: 56,
+              height: 56,
+              semanticsLabel: 'Tarjim logo',
+            ),
             const SizedBox(width: 12),
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Text(
-                AppConstants.appNameArabic,
-                style: AppTheme.arabicText(
-                  fontSize: 24,
-                  color: theme.colorScheme.primary,
-                ),
+            Flexible(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    AppConstants.appName,
+                    style: theme.textTheme.headlineLarge,
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    AppConstants.appNameArabic,
+                    style: AppTheme.arabicText(
+                      fontSize: 24,
+                      color: theme.colorScheme.primary,
+                    ),
+                  ),
+                ],
               ),
             ),
           ],

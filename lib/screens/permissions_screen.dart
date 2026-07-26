@@ -92,12 +92,18 @@ class PermissionsScreen extends StatelessWidget {
               AppButton(
                 label: 'Request Permissions',
                 icon: Icons.verified_user_rounded,
-                onPressed: () {
-                  controller.requestPermissions();
+                onPressed: () async {
+                  await controller.requestPermissions();
+                  if (!context.mounted) return;
+                  final granted =
+                      controller.overlayStatus == ServiceStatus.granted;
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
+                    SnackBar(
                       content: Text(
-                        'Native permission flow connects in Step 5.',
+                        granted
+                            ? 'Overlay permission granted.'
+                            : 'Not granted yet — enable "Display over '
+                                'other apps" in the system screen.',
                       ),
                     ),
                   );
