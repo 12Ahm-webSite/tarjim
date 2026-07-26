@@ -1,10 +1,13 @@
 package com.example.tarjim.channels
 
 import android.content.Context
+import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
+import com.example.tarjim.managers.ScreenCaptureManager
+import com.example.tarjim.services.MediaProjectionService
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 
@@ -14,29 +17,34 @@ import io.flutter.plugin.common.MethodChannel
  *
  * Contract:
  * - Status/availability queries return real data maps.
- * - Actions not yet implemented (Step 6 capture, Step 9 overlay window)
- *   return `error("NOT_IMPLEMENTED", ...)` — an explicit, testable
- *   response instead of silent fakery.
+ * - startScreenCapture parks its result and delegates to the activity
+ *   (consent dialog → foreground service → PNG bytes).
  * - Stop/hide actions are idempotent and always succeed.
+ * - The overlay window still answers NOT_IMPLEMENTED (Step 9).
  *
- * Keep this class logic-free: it only routes. Step 6+ delegates real
- * work to the managers (ScreenCaptureManager, OverlayManager).
+ * Keep this class logic-free: it only routes. Real work lives in the
+ * managers (ScreenCaptureManager) and services (MediaProjectionService).
  */
-class MethodChannelHandler(private val context: Context) :
-    MethodChannel.MethodCallHandler {
+class MethodChannelHandler(
+    private val context: Context,
+    private val startCaptureLauncher: (MethodChannel.Result) -> Unit,
+) : MethodChannel.MethodCallHandler {
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         Log.d(TAG, "onMethodCall: ${call.method}")
         when (call.method) {
-            "startScreenCapture" -> result.error(
-                "NOT_IMPLEMENTED",
-                "MediaProjection capture arrives in Step 6.",
-                null,
-            )
+            "startScreenCapture" -> startCaptureLauncher(result)
 
-            "stopScreenCapture" -> result.success(
-                mapOf("status" to "idle", "message" to "No active capture session.")
-            )
+            "stopScreenCapture" -> {
+                context.stopService(
+                    Intent(context, MediaProjectionService::class.java),
+                )
+                // Answer any parked startScreenCapture call as stopped.
+                ScreenCaptureManager.deliverError("STOPPED", "Capture stopped.")
+                result.success(
+                    mapOf("status" to "idle", "message" to "Capture stopped."),
+                )
+            }
 
             "showOverlay" -> result.error(
                 "NOT_IMPLEMENTED",

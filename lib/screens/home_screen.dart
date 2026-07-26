@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
@@ -54,9 +56,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Future<void> _onStartPressed() async {
     final error = await _controller.startTranslation();
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(error ?? 'Translation pipeline started.')),
-    );
+    if (error != null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error)));
+      return;
+    }
+    final capture = _controller.lastCapture;
+    if (capture != null) {
+      showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        builder: (_) => _CapturePreviewSheet(
+          bytes: capture,
+          filePath: _controller.lastCapturePath ?? '',
+        ),
+      );
+    }
   }
 
   void _openSettings() {
@@ -210,6 +226,361 @@ class _HeroHeader extends StatelessWidget {
           ],
         ),
       ],
+    );
+  }
+}
+
+/// Bottom sheet that previews the captured screenshot and shows
+/// verification metadata (byte size, pixel dimensions, temp file path).
+///
+/// This is Step 6's visual feedback mechanism — it confirms that
+/// the native MediaProjection pipeline successfully delivered PNG
+/// bytes back to Flutter via the MethodChannel.
+class _CapturePreviewSheet extends StatefulWidget {
+  const _CapturePreviewSheet({
+    required this.bytes,
+    required this.filePath,
+  });
+
+  final Uint8List bytes;
+  final String filePath;
+
+  @override
+  State<_CapturePreviewSheet> createState() => _CapturePreviewSheetState();
+}
+
+class _CapturePreviewSheetState extends State<_CapturePreviewSheet> {
+  int? _width;
+  int? _height;
+  bool _decoding = true;
+  String? _decodeError;
+
+  @override
+  void initState() {
+    super.initState();
+    _decodeDimensions();
+  }
+
+  Future<void> _decodeDimensions() async {
+    try {
+      final decoded = await decodeImageFromList(widget.bytes);
+      if (!mounted) return;
+      setState(() {
+        _width = decoded.width;
+        _height = decoded.height;
+        _decoding = false;
+      });
+      decoded.dispose();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _decodeError = e.toString();
+        _decoding = false;
+      });
+    }
+  }
+
+  String _formatBytes(int bytes) {
+    const units = ['B', 'KB', 'MB', 'GB'];
+    double size = bytes.toDouble();
+    int unitIndex = 0;
+    while (size >= 1024 && unitIndex < units.length - 1) {
+      size /= 1024;
+      unitIndex++;
+    }
+    return '${size.toStringAsFixed(size < 10 && unitIndex > 0 ? 2 : 0)} ${units[unitIndex]}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final mediaQuery = MediaQuery.of(context);
+    final sheetHeight = mediaQuery.size.height * 0.82;
+
+    return Container(
+      height: sheetHeight,
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Container(
+            padding: const EdgeInsets.fromLTRB(20, 14, 12, 8),
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(
+                  color: theme.colorScheme.outlineVariant.withValues(alpha: 0.5),
+                ),
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.image_rounded,
+                  color: theme.colorScheme.primary,
+                  size: 22,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Capture Preview',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Close',
+                  icon: const Icon(Icons.close_rounded),
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: double.infinity,
+                    constraints: BoxConstraints(
+                      maxHeight: sheetHeight * 0.45,
+                    ),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surfaceContainerHighest,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: theme.colorScheme.outlineVariant.withValues(alpha: 0.6),
+                      ),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: InteractiveViewer(
+                      minScale: 0.5,
+                      maxScale: 5,
+                      boundaryMargin: const EdgeInsets.all(20),
+                      child: Image.memory(
+                        widget.bytes,
+                        fit: BoxFit.contain,
+                        gaplessPlayback: true,
+                        errorBuilder: (ctx, err, _) => Padding(
+                          padding: const EdgeInsets.all(20),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                Icons.broken_image_rounded,
+                                size: 44,
+                                color: theme.colorScheme.error,
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                'Preview unavailable',
+                                style: theme.textTheme.bodyMedium?.copyWith(
+                                  color: theme.colorScheme.error,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                err.toString(),
+                                style: theme.textTheme.bodySmall,
+                                textAlign: TextAlign.center,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Text(
+                    'Capture Details',
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w700,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  _DetailRow(
+                    icon: Icons.sd_storage_rounded,
+                    label: 'File size',
+                    value: _formatBytes(widget.bytes.lengthInBytes),
+                    subValue: '${widget.bytes.lengthInBytes} bytes',
+                  ),
+                  _DetailRow(
+                    icon: Icons.aspect_ratio_rounded,
+                    label: 'Dimensions',
+                    value: _decoding
+                        ? 'Decoding…'
+                        : _decodeError != null
+                            ? 'Decode failed'
+                            : _width != null && _height != null
+                                ? '$_width × $_height px'
+                                : 'Unknown',
+                    subValue: _decodeError,
+                    error: _decodeError != null,
+                    loading: _decoding,
+                  ),
+                  _DetailRow(
+                    icon: Icons.folder_rounded,
+                    label: 'Saved to',
+                    value: widget.filePath.isEmpty
+                        ? '(not persisted)'
+                        : widget.filePath,
+                    mono: true,
+                  ),
+                  _DetailRow(
+                    icon: Icons.enhance_photo_translate_rounded,
+                    label: 'Format',
+                    value: 'PNG · RGBA 8-bit',
+                  ),
+                  const SizedBox(height: 10),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.primaryContainer.withValues(alpha: 0.45),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Icon(
+                            Icons.info_outline_rounded,
+                            size: 18,
+                            color: theme.colorScheme.primary,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            'Step 6 verified — MediaProjection successfully '
+                            'captured one frame and delivered PNG bytes to '
+                            'Flutter through the MethodChannel.',
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.onPrimaryContainer,
+                              fontWeight: FontWeight.w600,
+                              height: 1.35,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A label / value row used inside the capture preview details list.
+class _DetailRow extends StatelessWidget {
+  const _DetailRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+    this.subValue,
+    this.mono = false,
+    this.error = false,
+    this.loading = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+  final String? subValue;
+  final bool mono;
+  final bool error;
+  final bool loading;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final valueStyle = mono
+        ? theme.textTheme.bodyMedium?.copyWith(
+            fontFamily: 'monospace',
+            color: error ? theme.colorScheme.error : null,
+          )
+        : theme.textTheme.bodyMedium?.copyWith(
+            fontWeight: FontWeight.w600,
+            color: error
+                ? theme.colorScheme.error
+                : loading
+                    ? theme.colorScheme.onSurfaceVariant
+                    : null,
+          );
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Icon(
+              icon,
+              size: 18,
+            color: loading
+                ? theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.6)
+                : error
+                    ? theme.colorScheme.error
+                    : theme.colorScheme.primary,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                if (loading)
+                  Row(
+                    children: [
+                      SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: theme.colorScheme.primary,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(value, style: valueStyle),
+                    ],
+                  )
+                else
+                  Text(value, style: valueStyle),
+                if (subValue != null && subValue!.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    subValue!,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: error
+                          ? theme.colorScheme.error.withValues(alpha: 0.8)
+                          : theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

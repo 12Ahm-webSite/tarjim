@@ -12,15 +12,27 @@ class MediaProjectionService {
   static const _tag = 'MediaProjectionService';
   static const _channel = MethodChannel(AppConstants.methodChannelName);
 
-  /// Asks native to begin a capture session. Step 6 implements the
-  /// actual MediaProjection consent + VirtualDisplay.
-  Future<void> startScreenCapture() async {
+  /// Runs the full capture handshake: system consent dialog →
+  /// foreground service → single screenshot. Completes with the PNG
+  /// bytes, or throws [PlatformException] (DENIED / STOPPED /
+  /// CAPTURE_FAILED / BUSY).
+  Future<Uint8List> startScreenCapture() async {
     AppLogger.info('→ startScreenCapture', tag: _tag);
     try {
-      final res = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+      final res = await _channel.invokeMethod<Uint8List>(
         'startScreenCapture',
       );
-      AppLogger.info('← startScreenCapture: $res', tag: _tag);
+      if (res == null) {
+        throw PlatformException(
+          code: 'NO_DATA',
+          message: 'Native returned no image data.',
+        );
+      }
+      AppLogger.info(
+        '← startScreenCapture: ${res.lengthInBytes} bytes',
+        tag: _tag,
+      );
+      return res;
     } on PlatformException catch (e) {
       AppLogger.warning(
         '✕ startScreenCapture [${e.code}]: ${e.message}',

@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
@@ -30,11 +32,26 @@ class AppController extends ChangeNotifier {
   bool _isTranslating = false;
   bool get isTranslating => _isTranslating;
 
+  bool _capturePending = false;
+
+  /// A capture request is awaiting consent or a frame.
+  bool get capturePending => _capturePending;
+
+  /// True while any native operation is in flight (disables Start).
+  bool get isBusy => _isTranslating || _capturePending;
+
   /// Last pipeline error, surfaced to the UI as a SnackBar message.
   String? lastError;
 
   /// Whether the device supports MediaProjection at all.
   bool captureAvailable = false;
+
+  // ─── Capture results (Step 6) ────────────────────────────────────
+  /// PNG bytes of the latest screenshot, ready for OCR in Step 7.
+  Uint8List? lastCapture;
+
+  /// Temp path where [lastCapture] was written for debugging.
+  String? lastCapturePath;
 
   // ─── Status sync ─────────────────────────────────────────────────
   /// Re-queries real native state. Safe to call on app init and resume —
@@ -62,13 +79,11 @@ class AppController extends ChangeNotifier {
     await refreshStatuses();
   }
 
-  /// Step 5 handshake: checks overlay permission, then exercises the
-  /// native channel methods in pipeline order. Capture (Step 6) and the
-  /// overlay window (Step 9) answer NOT_IMPLEMENTED for now; on any
-  /// failure we run idempotent cleanup so native state stays consistent.
+  /// Step 6 pipeline: overlay permission check → system consent dialog
+  /// → foreground service → one screenshot → PNG bytes saved to a temp
+  /// file and kept in [lastCapture] for the preview sheet / Step 7 OCR.
   ///
-  /// Returns an error message for the UI, or null once the real
-  /// pipeline starts successfully (future steps).
+  /// Returns an error message for the UI, or null on success.
   Future<String?> startTranslation() async {
     lastError = null;
 
@@ -81,45 +96,62 @@ class AppController extends ChangeNotifier {
     }
     overlayStatus = ServiceStatus.granted;
 
-    String? failure;
-    try {
-      await _overlay.showOverlay(); // Step 9 implements the window.
-    } on PlatformException catch (e) {
-      failure = e.message;
-    }
-    try {
-      await _mediaProjection.startScreenCapture(); // Step 6 implements.
-    } on PlatformException catch (e) {
-      failure = e.message;
-    }
-
-    if (failure != null) {
-      await _overlay.hideOverlay();
-      await _mediaProjection.stopScreenCapture();
-      lastError = failure;
-      notifyListeners();
-      return failure;
-    }
-
-    _isTranslating = true;
+    _capturePending = true;
     screenCaptureStatus = ServiceStatus.running;
-    ocrStatus = ServiceStatus.running;
-    translationStatus = ServiceStatus.running;
-    AppLogger.info('Translation pipeline started', tag: _tag);
     notifyListeners();
-    return null;
+
+    try {
+      final bytes = await _mediaProjection.startScreenCapture();
+      lastCapture = bytes;
+      lastCapturePath = await _saveTempCapture(bytes);
+      screenCaptureStatus = ServiceStatus.granted;
+      AppLogger.info(
+        'Screenshot received: ${bytes.lengthInBytes} bytes '
+        '→ $lastCapturePath',
+        tag: _tag,
+      );
+    } on PlatformException catch (e) {
+      lastCapture = null;
+      screenCaptureStatus = switch (e.code) {
+        'DENIED' => ServiceStatus.denied,
+        'STOPPED' => ServiceStatus.idle,
+        _ => ServiceStatus.error,
+      };
+      lastError = e.message ?? 'Capture failed (${e.code}).';
+      AppLogger.warning(
+        'Capture failed [${e.code}]: ${e.message}',
+        tag: _tag,
+      );
+    } finally {
+      _capturePending = false;
+      notifyListeners();
+    }
+    return lastError;
   }
 
-  /// Stops the pipeline and resets stage statuses.
+  /// Stops the pipeline: kills the capture service (a pending
+  /// screenshot then resolves as STOPPED) and hides the overlay.
   Future<void> stopTranslation() async {
-    if (!_isTranslating) return;
+    if (!isBusy) return;
     await _mediaProjection.stopScreenCapture();
     await _overlay.hideOverlay();
     _isTranslating = false;
-    screenCaptureStatus = ServiceStatus.idle;
     ocrStatus = ServiceStatus.idle;
     translationStatus = ServiceStatus.idle;
+    if (!_capturePending) {
+      screenCaptureStatus = ServiceStatus.idle;
+    }
     AppLogger.info('Translation pipeline stopped', tag: _tag);
     notifyListeners();
+  }
+
+  /// Persists a capture for debugging/verification in the app temp dir.
+  Future<String> _saveTempCapture(Uint8List bytes) async {
+    final file = File(
+      '${Directory.systemTemp.path}/tarjim_capture_'
+      '${DateTime.now().millisecondsSinceEpoch}.png',
+    );
+    await file.writeAsBytes(bytes, flush: true);
+    return file.path;
   }
 }
