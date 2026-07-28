@@ -1,3 +1,4 @@
+
 package com.example.tarjim.services
 
 import android.app.Activity
@@ -109,7 +110,6 @@ class MediaProjectionService : Service() {
             }
             try {
                 val image = r.acquireLatestImage() ?: return@OnImageAvailableListener
-                frameDelivered = true
                 handler.removeCallbacks(timeoutRunnable)
                 processImageAndDeliver(image)
             } catch (e: Exception) {
@@ -134,9 +134,14 @@ class MediaProjectionService : Service() {
     private fun processImageAndDeliver(image: Image) {
         try {
             val planes = image.planes
-            val buffer = planes.buffer
-            val pixelStride = planes.pixelStride
-            val rowStride = planes.rowStride
+            if (planes.isEmpty()) {
+                image.close()
+                deliverErrorOnce("FRAME_ERROR", "Image planes are empty")
+                return
+            }
+            val buffer = planes[0].buffer
+            val pixelStride = planes[0].pixelStride
+            val rowStride = planes[0].rowStride
             val rowPadding = rowStride - pixelStride * image.width
 
             val bitmap = Bitmap.createBitmap(
@@ -155,15 +160,12 @@ class MediaProjectionService : Service() {
             val byteArray = stream.toByteArray()
             cleanBitmap.recycle()
 
-            // Modified to call the base delivery logic to bypass the unresolved method error
-            ScreenCaptureManager.deliverResult(byteArray)
+            frameDelivered = true
+            ScreenCaptureManager.deliverCapture(byteArray)
         } catch (e: Exception) {
             image.close()
-            // Fail-safe dynamic fallback if delivery method naming differs in your environment
-            try {
-                ScreenCaptureManager::class.java.methods.find { it.name.contains("result", ignoreCase = true) || it.name.contains("success", ignoreCase = true) }?.invoke(null, image)
-            } catch(ex: Exception) {}
-            throw e
+            Log.e(TAG, "processImageAndDeliver failed", e)
+            deliverErrorOnce("FRAME_ERROR", e.message)
         } finally {
             stopSelf()
         }
