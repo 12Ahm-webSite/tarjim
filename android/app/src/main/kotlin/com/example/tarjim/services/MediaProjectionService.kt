@@ -36,6 +36,7 @@ class MediaProjectionService : Service() {
     private var cleanedUp = false
 
     @Volatile private var frameDelivered = false
+    @Volatile private var callbackHandled = false
     private var projectionCallback: MediaProjection.Callback? = null
     private var imageListener: ImageReader.OnImageAvailableListener? = null
 
@@ -43,6 +44,7 @@ class MediaProjectionService : Service() {
         if (!frameDelivered && !cleanedUp) {
             Log.w(TAG, "Capture timed out after ${CAPTURE_TIMEOUT_MS}ms")
             deliverErrorOnce("TIMEOUT", "No frame received within the timeout window.")
+            cleanup()
             stopSelf()
         }
     }
@@ -106,19 +108,29 @@ class MediaProjectionService : Service() {
 
         val listener = ImageReader.OnImageAvailableListener { r ->
             DebugLogBridge.log("ImageReader callback fired", "MediaProjectionService", "INFO")
-            if (frameDelivered) {
+            if (callbackHandled) {
                 val stray = r.acquireLatestImage()
                 stray?.close()
                 return@OnImageAvailableListener
             }
+            callbackHandled = true
+            reader.setOnImageAvailableListener(null, null)
             try {
-                DebugLogBridge.log("PNG conversion started", "MediaProjectionService", "INFO")
-                val image = r.acquireLatestImage() ?: return@OnImageAvailableListener
+                val image = r.acquireLatestImage()
+                if (image == null) {
+                    handler.removeCallbacks(timeoutRunnable)
+                    deliverErrorOnce("FRAME_ERROR", "Failed to acquire image from ImageReader.")
+                    cleanup()
+                    stopSelf()
+                    return@OnImageAvailableListener
+                }
                 handler.removeCallbacks(timeoutRunnable)
+                DebugLogBridge.log("PNG conversion started", "MediaProjectionService", "INFO")
                 processImageAndDeliver(image)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to process image frame", e)
                 deliverErrorOnce("FRAME_ERROR", e.message)
+                cleanup()
                 stopSelf()
             }
         }
@@ -154,7 +166,6 @@ class MediaProjectionService : Service() {
                 Bitmap.Config.ARGB_8888
             )
             bitmap.copyPixelsFromBuffer(buffer)
-            image.close()
 
             val cleanBitmap = Bitmap.createBitmap(bitmap, 0, 0, image.width, image.height)
             bitmap.recycle()
@@ -163,15 +174,20 @@ class MediaProjectionService : Service() {
             cleanBitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
             val byteArray = stream.toByteArray()
             cleanBitmap.recycle()
+            image.close()
 
             DebugLogBridge.log("PNG conversion completed", "MediaProjectionService", "INFO")
             frameDelivered = true
             ScreenCaptureManager.deliverCapture(byteArray)
         } catch (e: Exception) {
-            image.close()
+            try {
+                image.close()
+            } catch (_: Exception) {
+            }
             Log.e(TAG, "processImageAndDeliver failed", e)
             deliverErrorOnce("FRAME_ERROR", e.message)
         } finally {
+            cleanup()
             stopSelf()
         }
     }
@@ -215,16 +231,18 @@ class MediaProjectionService : Service() {
         if (cleanedUp) return
         cleanedUp = true
         handler.removeCallbacks(timeoutRunnable)
-        
+
         try {
             virtualDisplay?.release()
             imageReader?.setOnImageAvailableListener(null, null)
             imageReader?.close()
-            
+            imageReader = null
+
             if (projectionCallback != null) {
                 mediaProjection?.unregisterCallback(projectionCallback!!)
             }
             mediaProjection?.stop()
+            mediaProjection = null
         } catch (e: Exception) {
             Log.e(TAG, "Error during resource cleanup", e)
         }
