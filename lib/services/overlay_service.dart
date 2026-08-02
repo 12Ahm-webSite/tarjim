@@ -2,6 +2,7 @@ import 'package:flutter/services.dart';
 
 import '../core/constants/app_constants.dart';
 import '../core/utils/logger.dart';
+import '../core/utils/logger_service.dart';
 
 /// Flutter endpoint for the native translation overlay.
 ///
@@ -14,6 +15,7 @@ class OverlayService {
 
   /// Real grant state of SYSTEM_ALERT_WINDOW ("Display over other apps").
   Future<bool> checkOverlayPermission() async {
+    LoggerService.instance.log('Checking overlay permission', source: 'OverlayService');
     AppLogger.info('→ checkOverlayPermission', tag: _tag);
     try {
       final res = await _channel.invokeMethod<Map<dynamic, dynamic>>(
@@ -32,6 +34,7 @@ class OverlayService {
 
   /// Shows the translation overlay above other apps. Step 9 implements.
   Future<void> showOverlay() async {
+    LoggerService.instance.log('MethodChannel.showOverlay()', source: 'OverlayService');
     AppLogger.info('→ showOverlay', tag: _tag);
     try {
       final res = await _channel.invokeMethod<Map<dynamic, dynamic>>(
@@ -46,6 +49,7 @@ class OverlayService {
 
   /// Hides the overlay. Idempotent — succeeds even when nothing is shown.
   Future<void> hideOverlay() async {
+    LoggerService.instance.log('MethodChannel.hideOverlay()', source: 'OverlayService');
     AppLogger.info('→ hideOverlay', tag: _tag);
     try {
       final res = await _channel.invokeMethod<Map<dynamic, dynamic>>(

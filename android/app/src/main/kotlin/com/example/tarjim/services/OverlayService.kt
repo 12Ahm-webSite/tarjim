@@ -4,6 +4,7 @@ import android.app.Service
 import android.content.Intent
 import android.os.IBinder
 import android.util.Log
+import com.example.tarjim.DebugLogBridge
 
 /**
  * Will host the system overlay window that displays translations above
@@ -17,6 +18,7 @@ class OverlayService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        DebugLogBridge.log("Overlay service started", "OverlayService", "INFO")
         Log.d(TAG, "Service started (stub — overlay logic arrives in Step 9)")
         return START_NOT_STICKY
     }

@@ -6,6 +6,7 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
+import com.example.tarjim.DebugLogBridge
 import com.example.tarjim.managers.ScreenCaptureManager
 import com.example.tarjim.services.MediaProjectionService
 import io.flutter.plugin.common.MethodCall
@@ -32,10 +33,12 @@ class MethodChannelHandler(
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         Log.d(TAG, "onMethodCall: ${call.method}")
+        logToFlutter("MethodChannel call received: ${call.method}", "MethodChannelHandler", "INFO")
         when (call.method) {
             "startScreenCapture" -> startCaptureLauncher(result)
 
             "stopScreenCapture" -> {
+                logToFlutter("stopScreenCapture requested", "MethodChannelHandler", "INFO")
                 context.stopService(
                     Intent(context, MediaProjectionService::class.java),
                 )
@@ -46,21 +49,31 @@ class MethodChannelHandler(
                 )
             }
 
-            "showOverlay" -> result.error(
-                "NOT_IMPLEMENTED",
-                "Overlay window arrives in Step 9.",
-                null,
-            )
+            "showOverlay" -> {
+                logToFlutter("showOverlay requested", "MethodChannelHandler", "INFO")
+                result.error(
+                    "NOT_IMPLEMENTED",
+                    "Overlay window arrives in Step 9.",
+                    null,
+                )
+            }
 
-            "hideOverlay" -> result.success(
-                mapOf("status" to "hidden", "message" to "No active overlay.")
-            )
+            "hideOverlay" -> {
+                logToFlutter("hideOverlay requested", "MethodChannelHandler", "INFO")
+                result.success(
+                    mapOf("status" to "hidden", "message" to "No active overlay."),
+                )
+            }
 
-            "checkOverlayPermission" -> result.success(
-                mapOf("granted" to Settings.canDrawOverlays(context))
-            )
+            "checkOverlayPermission" -> {
+                logToFlutter("checkOverlayPermission requested", "MethodChannelHandler", "INFO")
+                result.success(
+                    mapOf("granted" to Settings.canDrawOverlays(context)),
+                )
+            }
 
             "checkScreenCaptureAvailability" -> {
+                logToFlutter("checkScreenCaptureAvailability requested", "MethodChannelHandler", "INFO")
                 val manager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE)
                         as? MediaProjectionManager
                 result.success(
@@ -76,6 +89,10 @@ class MethodChannelHandler(
                 result.notImplemented()
             }
         }
+    }
+
+    private fun logToFlutter(message: String, source: String, level: String) {
+        DebugLogBridge.log(message, source, level)
     }
 
     companion object {

@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../core/constants/app_constants.dart';
 import '../core/theme/app_theme.dart';
 import '../core/utils/logger.dart';
+import '../core/utils/logger_service.dart';
+import 'debug_console_screen.dart';
 
 /// Settings shell for the MVP.
 ///
@@ -144,6 +146,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 ],
               ),
+            ),
+          ),
+          const SizedBox(height: 20),
+          _SectionLabel(label: 'Debug'),
+          Card(
+            child: ListTile(
+              leading: Icon(
+                Icons.bug_report_rounded,
+                color: theme.colorScheme.primary,
+              ),
+              title: const Text('Open Debug Console'),
+              subtitle: const Text('Inspect MediaProjection lifecycle logs'),
+              trailing: const Icon(Icons.chevron_right_rounded),
+              onTap: () {
+                LoggerService.instance.log('Debug console opened', source: 'Flutter');
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const DebugConsoleScreen()),
+                );
+              },
             ),
           ),
           const SizedBox(height: 20),

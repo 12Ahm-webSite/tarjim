@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../core/utils/logger.dart';
+import '../core/utils/logger_service.dart';
 import '../services/media_projection_service.dart';
 import '../services/overlay_service.dart';
 import '../services/permission_service.dart';
@@ -58,6 +59,7 @@ class AppController extends ChangeNotifier {
   /// this is what keeps the status cards honest after the user returns
   /// from system permission screens.
   Future<void> refreshStatuses() async {
+    LoggerService.instance.log('Refreshing pipeline statuses', source: 'AppController');
     final overlayGranted = await _overlay.checkOverlayPermission();
     overlayStatus =
         overlayGranted ? ServiceStatus.granted : ServiceStatus.idle;
@@ -74,6 +76,7 @@ class AppController extends ChangeNotifier {
   // ─── Intents ─────────────────────────────────────────────────────
   /// Requests runtime permissions, then refreshes card state from truth.
   Future<void> requestPermissions() async {
+    LoggerService.instance.log('Requesting permissions', source: 'AppController');
     await _permissions.requestNotifications();
     await _permissions.requestOverlay();
     await refreshStatuses();
@@ -85,6 +88,7 @@ class AppController extends ChangeNotifier {
   ///
   /// Returns an error message for the UI, or null on success.
   Future<String?> startTranslation() async {
+    LoggerService.instance.log('Start Translation pressed', source: 'AppController');
     lastError = null;
 
     if (!await _overlay.checkOverlayPermission()) {
@@ -97,6 +101,7 @@ class AppController extends ChangeNotifier {
     overlayStatus = ServiceStatus.granted;
 
     _capturePending = true;
+    LoggerService.instance.log('capturePending set to true', source: 'AppController');
     screenCaptureStatus = ServiceStatus.running;
     notifyListeners();
 
@@ -104,6 +109,7 @@ class AppController extends ChangeNotifier {
       final bytes = await _mediaProjection.startScreenCapture();
       lastCapture = bytes;
       lastCapturePath = await _saveTempCapture(bytes);
+      LoggerService.instance.log('Screen capture completed', source: 'AppController');
       screenCaptureStatus = ServiceStatus.granted;
       AppLogger.info(
         'Screenshot received: ${bytes.lengthInBytes} bytes '
@@ -124,6 +130,7 @@ class AppController extends ChangeNotifier {
       );
     } finally {
       _capturePending = false;
+      LoggerService.instance.log('capturePending reset', source: 'AppController');
       notifyListeners();
     }
     return lastError;
@@ -132,6 +139,7 @@ class AppController extends ChangeNotifier {
   /// Stops the pipeline: kills the capture service (a pending
   /// screenshot then resolves as STOPPED) and hides the overlay.
   Future<void> stopTranslation() async {
+    LoggerService.instance.log('Stop Translation pressed', source: 'AppController');
     if (!isBusy) return;
     await _mediaProjection.stopScreenCapture();
     await _overlay.hideOverlay();
@@ -147,6 +155,7 @@ class AppController extends ChangeNotifier {
 
   /// Persists a capture for debugging/verification in the app temp dir.
   Future<String> _saveTempCapture(Uint8List bytes) async {
+    LoggerService.instance.log('Saving temporary capture file', source: 'AppController');
     final file = File(
       '${Directory.systemTemp.path}/tarjim_capture_'
       '${DateTime.now().millisecondsSinceEpoch}.png',

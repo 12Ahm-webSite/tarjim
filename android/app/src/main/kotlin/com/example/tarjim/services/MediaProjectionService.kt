@@ -23,6 +23,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.example.tarjim.DebugLogBridge
 import com.example.tarjim.managers.ScreenCaptureManager
 import java.io.ByteArrayOutputStream
 
@@ -65,6 +66,7 @@ class MediaProjectionService : Service() {
             return START_NOT_STICKY
         }
 
+        DebugLogBridge.log("Foreground service started", "MediaProjectionService", "INFO")
         startForegroundWithNotification()
         try {
             beginCapture(resultCode, data)
@@ -103,12 +105,14 @@ class MediaProjectionService : Service() {
         imageReader = reader
 
         val listener = ImageReader.OnImageAvailableListener { r ->
+            DebugLogBridge.log("ImageReader callback fired", "MediaProjectionService", "INFO")
             if (frameDelivered) {
                 val stray = r.acquireLatestImage()
                 stray?.close()
                 return@OnImageAvailableListener
             }
             try {
+                DebugLogBridge.log("PNG conversion started", "MediaProjectionService", "INFO")
                 val image = r.acquireLatestImage() ?: return@OnImageAvailableListener
                 handler.removeCallbacks(timeoutRunnable)
                 processImageAndDeliver(image)
@@ -160,6 +164,7 @@ class MediaProjectionService : Service() {
             val byteArray = stream.toByteArray()
             cleanBitmap.recycle()
 
+            DebugLogBridge.log("PNG conversion completed", "MediaProjectionService", "INFO")
             frameDelivered = true
             ScreenCaptureManager.deliverCapture(byteArray)
         } catch (e: Exception) {

@@ -2,6 +2,7 @@ import 'package:flutter/services.dart';
 
 import '../core/constants/app_constants.dart';
 import '../core/utils/logger.dart';
+import '../core/utils/logger_service.dart';
 
 /// Flutter endpoint for the native MediaProjection pipeline.
 ///
@@ -17,6 +18,7 @@ class MediaProjectionService {
   /// bytes, or throws [PlatformException] (DENIED / STOPPED /
   /// CAPTURE_FAILED / BUSY).
   Future<Uint8List> startScreenCapture() async {
+    LoggerService.instance.log('MethodChannel.startScreenCapture()', source: 'MediaProjectionService');
     AppLogger.info('→ startScreenCapture', tag: _tag);
     try {
       final res = await _channel.invokeMethod<Uint8List>(
@@ -28,6 +30,10 @@ class MediaProjectionService {
           message: 'Native returned no image data.',
         );
       }
+      LoggerService.instance.log(
+        'Received ${res.lengthInBytes} bytes from MediaProjection',
+        source: 'MediaProjectionService',
+      );
       AppLogger.info(
         '← startScreenCapture: ${res.lengthInBytes} bytes',
         tag: _tag,
@@ -45,6 +51,7 @@ class MediaProjectionService {
   /// Asks native to stop the capture session. Always succeeds natively,
   /// even when no session is active (idempotent cleanup).
   Future<void> stopScreenCapture() async {
+    LoggerService.instance.log('MethodChannel.stopScreenCapture()', source: 'MediaProjectionService');
     AppLogger.info('→ stopScreenCapture', tag: _tag);
     try {
       final res = await _channel.invokeMethod<Map<dynamic, dynamic>>(
@@ -62,6 +69,7 @@ class MediaProjectionService {
 
   /// Whether the device can run MediaProjection (API level + service).
   Future<bool> checkScreenCaptureAvailability() async {
+    LoggerService.instance.log('Checking MediaProjection availability', source: 'MediaProjectionService');
     AppLogger.info('→ checkScreenCaptureAvailability', tag: _tag);
     try {
       final res = await _channel.invokeMethod<Map<dynamic, dynamic>>(

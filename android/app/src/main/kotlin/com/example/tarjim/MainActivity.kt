@@ -6,14 +6,15 @@ import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import io.flutter.embedding.android.FlutterFragmentActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
+import io.flutter.plugin.common.MethodChannel.Result
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import com.example.tarjim.channels.MethodChannelHandler
 import com.example.tarjim.managers.ScreenCaptureManager
 import com.example.tarjim.services.MediaProjectionService
-import io.flutter.embedding.android.FlutterFragmentActivity
-import io.flutter.embedding.engine.FlutterEngine
-import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterFragmentActivity() {
 
@@ -26,8 +27,10 @@ class MainActivity : FlutterFragmentActivity() {
             ActivityResultContracts.StartActivityForResult()
         ) { result ->
             if (result.resultCode == RESULT_OK && result.data != null) {
+                logToFlutter("Consent accepted", "MainActivity", "INFO")
                 startCaptureService(result.resultCode, result.data!!)
             } else {
+                logToFlutter("Consent denied", "MainActivity", "WARN")
                 ScreenCaptureManager.deliverError(
                     "DENIED", "Screen capture consent denied."
                 )
@@ -37,16 +40,19 @@ class MainActivity : FlutterFragmentActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        DebugLogBridge.setBinaryMessenger(flutterEngine.dartExecutor.binaryMessenger)
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             CHANNEL,
         ).setMethodCallHandler(
             MethodChannelHandler(this, ::launchScreenCaptureConsent),
         )
+        logToFlutter("MethodChannel registered", "MainActivity", "INFO")
         Log.d(TAG, "MethodChannel registered: $CHANNEL")
     }
 
-    private fun launchScreenCaptureConsent(flutterResult: MethodChannel.Result) {
+    private fun launchScreenCaptureConsent(flutterResult: Result) {
+        logToFlutter("MediaProjection dialog shown", "MainActivity", "INFO")
         if (!ScreenCaptureManager.holdResult(flutterResult)) {
             flutterResult.error(
                 "BUSY", "A capture request is already in progress.", null,
@@ -59,6 +65,7 @@ class MainActivity : FlutterFragmentActivity() {
     }
 
     private fun startCaptureService(resultCode: Int, data: Intent) {
+        logToFlutter("Foreground service start requested", "MainActivity", "INFO")
         val intent = Intent(this, MediaProjectionService::class.java)
             .putExtra(MediaProjectionService.EXTRA_RESULT_CODE, resultCode)
             .putExtra(MediaProjectionService.EXTRA_DATA, data)
@@ -67,6 +74,10 @@ class MainActivity : FlutterFragmentActivity() {
         } else {
             startService(intent)
         }
+    }
+
+    private fun logToFlutter(message: String, source: String, level: String) {
+        DebugLogBridge.log(message, source, level)
     }
 
     companion object {

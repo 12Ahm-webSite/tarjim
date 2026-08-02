@@ -3,10 +3,16 @@ import 'package:flutter/material.dart';
 import 'core/constants/app_constants.dart';
 import 'core/theme/app_theme.dart';
 import 'core/utils/logger.dart';
+import 'core/utils/logger_service.dart';
 import 'screens/home_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  LoggerService.instance.log(
+    'App started',
+    source: 'Flutter',
+    level: 'INFO',
+  );
   AppLogger.info(
     'Launching ${AppConstants.appName} v${AppConstants.appVersion}',
   );

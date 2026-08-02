@@ -6,6 +6,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import '../controllers/app_controller.dart';
 import '../core/constants/app_constants.dart';
 import '../core/theme/app_theme.dart';
+import '../core/utils/logger_service.dart';
 import '../widgets/app_button.dart';
 import '../widgets/status_card.dart';
 import 'permissions_screen.dart';
@@ -54,6 +55,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void _onControllerChanged() => setState(() {});
 
   Future<void> _onStartPressed() async {
+    LoggerService.instance.log('Start Translation button pressed', source: 'HomeScreen');
     final error = await _controller.startTranslation();
     if (!mounted) return;
     if (error != null) {

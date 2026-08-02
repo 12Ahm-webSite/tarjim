@@ -1,6 +1,7 @@
 import 'package:permission_handler/permission_handler.dart';
 
 import '../core/utils/logger.dart';
+import '../core/utils/logger_service.dart';
 
 /// Runtime permission requests (permission_handler plugin).
 ///
@@ -12,18 +13,30 @@ class PermissionService {
   /// Opens the system "Display over other apps" settings screen and
   /// completes after the user returns. True when granted.
   Future<bool> requestOverlay() async {
+    LoggerService.instance.log('Requesting overlay permission', source: 'PermissionService');
     AppLogger.info('Requesting SYSTEM_ALERT_WINDOW', tag: _tag);
     final status = await Permission.systemAlertWindow.request();
     AppLogger.info('Overlay permission → $status', tag: _tag);
+    LoggerService.instance.log(
+      status.isGranted ? 'Overlay permission granted' : 'Overlay permission denied',
+      source: 'PermissionService',
+      level: status.isGranted ? 'INFO' : 'WARN',
+    );
     return status.isGranted;
   }
 
   /// POST_NOTIFICATIONS — lets the capture foreground service show its
   /// mandatory ongoing notification on Android 13+.
   Future<bool> requestNotifications() async {
+    LoggerService.instance.log('Requesting notification permission', source: 'PermissionService');
     AppLogger.info('Requesting POST_NOTIFICATIONS', tag: _tag);
     final status = await Permission.notification.request();
     AppLogger.info('Notification permission → $status', tag: _tag);
+    LoggerService.instance.log(
+      status.isGranted ? 'Notification permission granted' : 'Notification permission denied',
+      source: 'PermissionService',
+      level: status.isGranted ? 'INFO' : 'WARN',
+    );
     return status.isGranted;
   }
 }

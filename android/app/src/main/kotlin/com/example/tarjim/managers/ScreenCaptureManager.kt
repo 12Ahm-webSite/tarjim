@@ -1,6 +1,7 @@
 package com.example.tarjim.managers
 
 import android.util.Log
+import com.example.tarjim.DebugLogBridge
 import io.flutter.plugin.common.MethodChannel
 
 /**
@@ -38,6 +39,7 @@ object ScreenCaptureManager {
         if (pendingResult != null) return false
         pendingResult = result
         answered = false
+        DebugLogBridge.log("Capture result parked", "ScreenCaptureManager", "INFO")
         Log.d(TAG, "Capture result parked")
         return true
     }
@@ -52,6 +54,7 @@ object ScreenCaptureManager {
         answered = true
         val res = pendingResult!!
         pendingResult = null
+        DebugLogBridge.log("deliverCapture() called with ${bytes.size} bytes", "ScreenCaptureManager", "INFO")
         Log.d(TAG, "Delivering capture: ${bytes.size} bytes")
         res.success(bytes)
     }
@@ -66,6 +69,7 @@ object ScreenCaptureManager {
         answered = true
         val res = pendingResult!!
         pendingResult = null
+        DebugLogBridge.log("deliverError() called [$code]: $message", "ScreenCaptureManager", "WARN")
         Log.w(TAG, "Delivering capture error [$code]: $message")
         res.error(code, message, null)
     }
