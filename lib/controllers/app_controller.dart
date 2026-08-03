@@ -1,11 +1,15 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../core/utils/logger.dart';
 import '../core/utils/logger_service.dart';
+import '../models/text_box.dart';
 import '../services/media_projection_service.dart';
+import '../services/ocr_service.dart';
 import '../services/overlay_service.dart';
 import '../services/permission_service.dart';
 
@@ -23,6 +27,7 @@ class AppController extends ChangeNotifier {
   final PermissionService _permissions = PermissionService();
   final MediaProjectionService _mediaProjection = MediaProjectionService();
   final OverlayService _overlay = OverlayService();
+  final OCRService _ocr = OCRService();
 
   // ─── Pipeline statuses ───────────────────────────────────────────
   ServiceStatus screenCaptureStatus = ServiceStatus.idle;
@@ -34,12 +39,13 @@ class AppController extends ChangeNotifier {
   bool get isTranslating => _isTranslating;
 
   bool _capturePending = false;
+  bool _ocrInProgress = false;
 
   /// A capture request is awaiting consent or a frame.
   bool get capturePending => _capturePending;
 
-  /// True while any native operation is in flight (disables Start).
-  bool get isBusy => _isTranslating || _capturePending;
+  /// True while any stage is in flight (disables Start button).
+  bool get isBusy => _isTranslating || _capturePending || _ocrInProgress;
 
   /// Last pipeline error, surfaced to the UI as a SnackBar message.
   String? lastError;
@@ -53,6 +59,21 @@ class AppController extends ChangeNotifier {
 
   /// Temp path where [lastCapture] was written for debugging.
   String? lastCapturePath;
+
+  // ─── OCR results (Step 7) ────────────────────────────────────────
+  /// Structured text regions detected in [lastCapture].
+  ///
+  /// Populated immediately after a successful screen capture in the
+  /// same `startTranslation` pipeline. Empty list means either OCR ran
+  /// and found no readable Japanese text, or the stage has not been
+  /// reached yet (check [ocrStatus] to distinguish).
+  List<TextBox> lastOcrResult = [];
+
+  @override
+  void dispose() {
+    _ocr.dispose();
+    super.dispose();
+  }
 
   // ─── Status sync ─────────────────────────────────────────────────
   /// Re-queries real native state. Safe to call on app init and resume —
@@ -82,14 +103,27 @@ class AppController extends ChangeNotifier {
     await refreshStatuses();
   }
 
-  /// Step 6 pipeline: overlay permission check → system consent dialog
-  /// → foreground service → one screenshot → PNG bytes saved to a temp
-  /// file and kept in [lastCapture] for the preview sheet / Step 7 OCR.
+  /// Full Step 6 → Step 7 pipeline:
+  ///   Overlay permission check
+  ///   → MediaProjection consent dialog
+  ///   → Foreground service + single screenshot
+  ///   → PNG bytes decoded
+  ///   → Japanese OCR via ML Kit
+  ///   → **STOP** (no Translation / Overlay yet).
   ///
-  /// Returns an error message for the UI, or null on success.
+  /// After this method returns, callers can read:
+  ///   * [screenCaptureStatus] — screenshot outcome
+  ///   * [lastCapture] + [lastCapturePath] — raw image payload
+  ///   * [ocrStatus] — OCR outcome
+  ///   * [lastOcrResult] — structured list of detected text regions
+  ///
+  /// Returns an error message for the UI SnackBar, or `null` on success.
   Future<String?> startTranslation() async {
     LoggerService.instance.log('Start Translation pressed', source: 'AppController');
     lastError = null;
+    lastOcrResult = [];
+    ocrStatus = ServiceStatus.idle;
+    translationStatus = ServiceStatus.idle;
 
     if (!await _overlay.checkOverlayPermission()) {
       overlayStatus = ServiceStatus.idle;
@@ -101,28 +135,90 @@ class AppController extends ChangeNotifier {
     overlayStatus = ServiceStatus.granted;
 
     _capturePending = true;
-    LoggerService.instance.log('capturePending set to true', source: 'AppController');
     screenCaptureStatus = ServiceStatus.running;
     notifyListeners();
 
     try {
+      // ── Step 6: Screen capture ──────────────────────────────────
+      LoggerService.instance.log('capturePending set to true', source: 'AppController');
       final bytes = await _mediaProjection.startScreenCapture();
       lastCapture = bytes;
       lastCapturePath = await _saveTempCapture(bytes);
-      LoggerService.instance.log('Screen capture completed', source: 'AppController');
       screenCaptureStatus = ServiceStatus.granted;
+      _capturePending = false;
+      LoggerService.instance.log('Screen capture completed', source: 'AppController');
       AppLogger.info(
-        'Screenshot received: ${bytes.lengthInBytes} bytes '
-        '→ $lastCapturePath',
+        'Step 6 capture OK: ${bytes.lengthInBytes} bytes → $lastCapturePath',
         tag: _tag,
       );
+      notifyListeners();
+
+      // ── Step 7: Japanese OCR ────────────────────────────────────
+      LoggerService.instance.log('Advancing pipeline to Step 7 (OCR)', source: 'AppController');
+      _ocrInProgress = true;
+      ocrStatus = ServiceStatus.running;
+      notifyListeners();
+
+      try {
+        // Decode the PNG header to recover the real source dimensions.
+        // ML Kit's `block.boundingBox` is expressed in these pixels,
+        // so we must keep them alongside every [TextBox] for later
+        // overlay scaling in Step 9.
+        //
+        // Note: dart:ui's decodeImageFromList uses a callback in this
+        // Dart version, so we bridge it to a Future via Completer.
+        final completer = Completer<Image>();
+        decodeImageFromList(bytes, (Image img) {
+          completer.complete(img);
+        });
+        final decoded = await completer.future;
+        final imgW = decoded.width;
+        final imgH = decoded.height;
+        decoded.dispose();
+        LoggerService.instance.log(
+          'PNG dimensions decoded: ${imgW}x$imgH',
+          source: _tag,
+        );
+
+        final boxes = await _ocr.processImage(
+          filePath: lastCapturePath,
+          bytes: bytes,
+          imageWidth: imgW,
+          imageHeight: imgH,
+        );
+        lastOcrResult = boxes;
+        ocrStatus = ServiceStatus.granted;
+        AppLogger.info(
+          'Step 7 OCR OK: stored ${boxes.length} boxes in lastOcrResult',
+          tag: _tag,
+        );
+        LoggerService.instance.log(
+          'OCR pipeline step completed: ${boxes.length} boxes stored',
+          source: _tag,
+        );
+      } catch (e) {
+        lastOcrResult = [];
+        ocrStatus = ServiceStatus.error;
+        lastError = lastError ?? 'OCR failed: ${e.runtimeType}';
+        AppLogger.warning('Step 7 OCR failed: $e', tag: _tag);
+        LoggerService.instance.log(
+          'OCR pipeline step failed: ${e.runtimeType}: $e',
+          source: _tag,
+        );
+      } finally {
+        _ocrInProgress = false;
+      }
     } on PlatformException catch (e) {
+      _capturePending = false;
+      _ocrInProgress = false;
       lastCapture = null;
       screenCaptureStatus = switch (e.code) {
         'DENIED' => ServiceStatus.denied,
         'STOPPED' => ServiceStatus.idle,
         _ => ServiceStatus.error,
       };
+      ocrStatus = ServiceStatus.idle;
+      lastOcrResult = [];
       lastError = e.message ?? 'Capture failed (${e.code}).';
       AppLogger.warning(
         'Capture failed [${e.code}]: ${e.message}',
@@ -130,7 +226,8 @@ class AppController extends ChangeNotifier {
       );
     } finally {
       _capturePending = false;
-      LoggerService.instance.log('capturePending reset', source: 'AppController');
+      _ocrInProgress = false;
+      LoggerService.instance.log('capturePending reset, ocrInProgress reset', source: 'AppController');
       notifyListeners();
     }
     return lastError;
@@ -140,10 +237,19 @@ class AppController extends ChangeNotifier {
   /// screenshot then resolves as STOPPED) and hides the overlay.
   Future<void> stopTranslation() async {
     LoggerService.instance.log('Stop Translation pressed', source: 'AppController');
-    if (!isBusy) return;
+    if (!isBusy) {
+      // Reset in-progress stages to idle even if nothing is running, so
+      // tapping Stop always clears prior Granted/Error transient state.
+      screenCaptureStatus = ServiceStatus.idle;
+      ocrStatus = ServiceStatus.idle;
+      translationStatus = ServiceStatus.idle;
+      notifyListeners();
+      return;
+    }
     await _mediaProjection.stopScreenCapture();
     await _overlay.hideOverlay();
     _isTranslating = false;
+    _ocrInProgress = false;
     ocrStatus = ServiceStatus.idle;
     translationStatus = ServiceStatus.idle;
     if (!_capturePending) {
