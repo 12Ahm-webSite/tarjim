@@ -40,6 +40,13 @@ class MediaProjectionService : Service() {
     private var projectionCallback: MediaProjection.Callback? = null
     private var imageListener: ImageReader.OnImageAvailableListener? = null
 
+    // Monotonic timestamp (System.currentTimeMillis()) at which the
+    // VirtualDisplay was created. Any frame received before
+    // `captureStartedAt + PRE_CAPTURE_DELAY_MS` is discarded silently.
+    // This gives the user ~2 seconds to switch from the Tarjim UI into
+    // the target app (e.g. Mihon) before a frame is considered valid.
+    private var captureStartedAt = 0L
+
     private val timeoutRunnable = Runnable {
         if (!frameDelivered && !cleanedUp) {
             Log.w(TAG, "Capture timed out after ${CAPTURE_TIMEOUT_MS}ms")
@@ -47,6 +54,22 @@ class MediaProjectionService : Service() {
             cleanup()
             stopSelf()
         }
+    }
+
+    // Second safety net: Even if the delay elapses, we require the
+    // VirtualDisplay to have produced at least MIN_VALID_FRAMES frames
+    // before accepting one. This avoids returning a stale GraphicsBuffer
+    // that still has the Tarjim activity composited (some GPUs keep the
+    // first submitted frame for one vsync cycle).
+    private val minValidFrames = 2
+    @Volatile private var framesObservedSinceReady = 0
+
+    private val preCaptureDelayElapsedRunnable = Runnable {
+        DebugLogBridge.log(
+            "Pre-capture delay of ${PRE_CAPTURE_DELAY_MS}ms elapsed — frames are now valid",
+            TAG, "INFO"
+        )
+        Log.d(TAG, "Pre-capture delay elapsed, frames from ImageReader will now be accepted")
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -86,6 +109,17 @@ class MediaProjectionService : Service() {
         val projection = manager.getMediaProjection(resultCode, data)
         mediaProjection = projection
 
+        if (projection == null) {
+            Log.e(TAG, "getMediaProjection returned null (resultCode=$resultCode)")
+            deliverErrorOnce(
+                "CAPTURE_FAILED",
+                "Failed to create MediaProjection — consent token may be stale. Retry the capture.",
+            )
+            cleanup()
+            stopSelf()
+            return
+        }
+
         val callback = object : MediaProjection.Callback() {
             override fun onStop() {
                 Log.d(TAG, "MediaProjection stopped by system")
@@ -96,7 +130,7 @@ class MediaProjectionService : Service() {
             }
         }
         projectionCallback = callback
-        projection?.registerCallback(callback, handler)
+        projection.registerCallback(callback, handler)
 
         val metrics = resources.displayMetrics
         val width = metrics.widthPixels
@@ -113,12 +147,46 @@ class MediaProjectionService : Service() {
                 stray?.close()
                 return@OnImageAvailableListener
             }
+
+            // ─── Pre-capture delay + early-frame discard ─────────────
+            val now = System.currentTimeMillis()
+            val elapsedSinceStart = now - captureStartedAt
+            if (elapsedSinceStart < PRE_CAPTURE_DELAY_MS) {
+                // Frame arrived too early — user hasn't had time to switch
+                // out of Tarjim. Drain it and keep waiting.
+                val early = r.acquireLatestImage()
+                early?.close()
+                val remain = PRE_CAPTURE_DELAY_MS - elapsedSinceStart
+                DebugLogBridge.log(
+                    "Frame ignored (too early) — ${remain}ms remaining before capture window",
+                    TAG, "INFO"
+                )
+                Log.d(TAG, "Ignoring early frame after ${elapsedSinceStart}ms; wait ${remain}ms more")
+                return@OnImageAvailableListener
+            }
+
+            // Frame arrived after the delay window, but also wait for at
+            // least minValidFrames so we don't capture a stale buffer
+            // that was queued before the user actually switched apps.
+            framesObservedSinceReady += 1
+            if (framesObservedSinceReady < minValidFrames) {
+                val stale = r.acquireLatestImage()
+                stale?.close()
+                DebugLogBridge.log(
+                    "Frame drained (stale buffer) — $framesObservedSinceReady/$minValidFrames observed",
+                    TAG, "INFO"
+                )
+                Log.d(TAG, "Draining stale buffer frame $framesObservedSinceReady/$minValidFrames")
+                return@OnImageAvailableListener
+            }
+
             callbackHandled = true
             reader.setOnImageAvailableListener(null, null)
             try {
                 val image = r.acquireLatestImage()
                 if (image == null) {
                     handler.removeCallbacks(timeoutRunnable)
+                    handler.removeCallbacks(preCaptureDelayElapsedRunnable)
                     deliverErrorOnce("FRAME_ERROR", "Failed to acquire image from ImageReader.")
                     cleanup()
                     stopSelf()
@@ -129,6 +197,7 @@ class MediaProjectionService : Service() {
                 processImageAndDeliver(image)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to process image frame", e)
+                handler.removeCallbacks(preCaptureDelayElapsedRunnable)
                 deliverErrorOnce("FRAME_ERROR", e.message)
                 cleanup()
                 stopSelf()
@@ -137,14 +206,52 @@ class MediaProjectionService : Service() {
         imageListener = listener
         reader.setOnImageAvailableListener(listener, handler)
 
-        virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "ScreenCapture",
-            width, height, dpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            reader.surface, null, handler
+        // ── Commit everything: create display, arm timers, record t0 ──
+        Log.d(TAG, "Creating VirtualDisplay ${width}x${height} @${dpi}dpi")
+        DebugLogBridge.log(
+            "VirtualDisplay W${width}H${height}D${dpi} armed; capture will begin after ${PRE_CAPTURE_DELAY_MS}ms delay",
+            TAG, "INFO"
         )
+        val vd = try {
+            projection.createVirtualDisplay(
+                "ScreenCapture",
+                width, height, dpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                reader.surface, null, handler
+            )
+        } catch (se: SecurityException) {
+            Log.e(TAG, "createVirtualDisplay threw SecurityException", se)
+            deliverErrorOnce(
+                "PERMISSION",
+                "MediaProjection permission revoked before display creation. Retry.",
+            )
+            cleanup()
+            stopSelf()
+            return
+        } catch (e: Exception) {
+            Log.e(TAG, "createVirtualDisplay failed", e)
+            deliverErrorOnce("CAPTURE_FAILED", e.message)
+            cleanup()
+            stopSelf()
+            return
+        }
 
+        if (vd == null) {
+            Log.e(TAG, "createVirtualDisplay returned null")
+            deliverErrorOnce(
+                "CAPTURE_FAILED",
+                "Failed to create virtual display — try again with a stable foreground app.",
+            )
+            cleanup()
+            stopSelf()
+            return
+        }
+        virtualDisplay = vd
+
+        captureStartedAt = System.currentTimeMillis()
+        handler.postDelayed(preCaptureDelayElapsedRunnable, PRE_CAPTURE_DELAY_MS)
         handler.postDelayed(timeoutRunnable, CAPTURE_TIMEOUT_MS)
+        Log.d(TAG, "[Timers] pre-capture delay=${PRE_CAPTURE_DELAY_MS}ms, hard timeout=${CAPTURE_TIMEOUT_MS}ms")
     }
 
     private fun processImageAndDeliver(image: Image) {
@@ -231,6 +338,7 @@ class MediaProjectionService : Service() {
         if (cleanedUp) return
         cleanedUp = true
         handler.removeCallbacks(timeoutRunnable)
+        handler.removeCallbacks(preCaptureDelayElapsedRunnable)
 
         try {
             virtualDisplay?.release()
@@ -258,6 +366,12 @@ class MediaProjectionService : Service() {
         private const val NOTIFICATION_ID = 101
         private const val NOTIF_CHANNEL_ID = "tarjim_capture_channel"
         private const val CAPTURE_TIMEOUT_MS = 5000L
+
+        // Time between VirtualDisplay creation and when the 1st frame is
+        // considered "valid". Gives the user a window to switch from the
+        // Tarjim activity into the app they want translated. Must stay
+        // well below CAPTURE_TIMEOUT_MS (we use 20% of the budget).
+        private const val PRE_CAPTURE_DELAY_MS = 2000L
 
         const val EXTRA_RESULT_CODE = "EXTRA_RESULT_CODE"
         const val EXTRA_DATA = "EXTRA_DATA"

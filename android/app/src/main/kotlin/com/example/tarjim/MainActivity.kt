@@ -28,6 +28,20 @@ class MainActivity : FlutterFragmentActivity() {
         ) { result ->
             if (result.resultCode == RESULT_OK && result.data != null) {
                 logToFlutter("Consent accepted", "MainActivity", "INFO")
+                // ─── Send Tarjim activity to background BEFORE the capture
+                // service starts the virtual display. This gives the
+                // foreground activity (e.g. Mihon) a full 2000ms window
+                // to be the currently-composited screen when the first
+                // valid frame is read. Without this call, the user would
+                // see Tarjim in the capture preview 100% of the time
+                // because Android animates the activity transition for
+                // ~250ms.
+                DebugLogBridge.log(
+                    "Sending Tarjim to background — switch to Mihon now (2s window)",
+                    "MainActivity", "INFO"
+                )
+                Log.d(TAG, "moveTaskToBack(true) — leaving room for target app")
+                moveTaskToBack(true)
                 startCaptureService(result.resultCode, result.data!!)
             } else {
                 logToFlutter("Consent denied", "MainActivity", "WARN")
