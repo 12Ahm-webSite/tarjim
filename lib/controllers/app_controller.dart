@@ -121,9 +121,24 @@ class AppController extends ChangeNotifier {
   Future<String?> startTranslation() async {
     LoggerService.instance.log('Start Translation pressed', source: 'AppController');
     lastError = null;
-    lastOcrResult = [];
-    ocrStatus = ServiceStatus.idle;
-    translationStatus = ServiceStatus.idle;
+
+    // ── Per-stage lifecycle transitions (no bulk Idle reset) ─────────
+    //
+    // Design rule: leave "Granted" values from prior runs alone so the
+    // UI can surface last successful result. At the START of a new run,
+    // transition ONLY the stages that are *about* to execute:
+    //
+    //   [Start pressed]
+    //     screenCaptureStatus := Running   ← capture is about to begin
+    //     ocrStatus           := Idle      ← hasn't started yet (clear
+    //                                        any stale error from last run)
+    //     translationStatus   := Idle      ← hasn't started yet
+    if (!isBusy) {
+      screenCaptureStatus = ServiceStatus.running;
+      ocrStatus = ServiceStatus.idle;
+      translationStatus = ServiceStatus.idle;
+      notifyListeners();
+    }
 
     if (!await _overlay.checkOverlayPermission()) {
       overlayStatus = ServiceStatus.idle;
@@ -135,7 +150,12 @@ class AppController extends ChangeNotifier {
     overlayStatus = ServiceStatus.granted;
 
     _capturePending = true;
-    screenCaptureStatus = ServiceStatus.running;
+    // Don't override screenCaptureStatus to Running again if it was
+    // already set above the overlay check (it was). Just make sure the
+    // UI reflects the new pending flag.
+    if (screenCaptureStatus != ServiceStatus.running) {
+      screenCaptureStatus = ServiceStatus.running;
+    }
     notifyListeners();
 
     try {
@@ -144,7 +164,12 @@ class AppController extends ChangeNotifier {
       final bytes = await _mediaProjection.startScreenCapture();
       lastCapture = bytes;
       lastCapturePath = await _saveTempCapture(bytes);
+
+      // After capture SUCCESS:
+      //   screenCaptureStatus := Granted   ← image available
+      //   ocrStatus           := Running   ← OCR is about to begin
       screenCaptureStatus = ServiceStatus.granted;
+      ocrStatus = ServiceStatus.running;
       _capturePending = false;
       LoggerService.instance.log('Screen capture completed', source: 'AppController');
       AppLogger.info(
@@ -156,7 +181,9 @@ class AppController extends ChangeNotifier {
       // ── Step 7: Japanese OCR ────────────────────────────────────
       LoggerService.instance.log('Advancing pipeline to Step 7 (OCR)', source: 'AppController');
       _ocrInProgress = true;
-      ocrStatus = ServiceStatus.running;
+      // Note: ocrStatus already = Running from the post-capture transition
+      // above. We just notify once more here so OCR "started" is logged
+      // at the right moment in the UI.
       notifyListeners();
 
       try {
@@ -187,6 +214,8 @@ class AppController extends ChangeNotifier {
           imageHeight: imgH,
         );
         lastOcrResult = boxes;
+        // After OCR SUCCESS:
+        //   ocrStatus := Granted
         ocrStatus = ServiceStatus.granted;
         AppLogger.info(
           'Step 7 OCR OK: stored ${boxes.length} boxes in lastOcrResult',

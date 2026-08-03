@@ -1,8 +1,8 @@
 
+import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
-import 'dart:ui';
 
+import 'package:flutter/services.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 
 import '../core/utils/logger.dart';
@@ -58,6 +58,18 @@ class OCRService {
   /// Returns an **ordered** list: blocks are sorted top-to-bottom by their
   /// bounding box `top`, then left-to-right by `left` — i.e. natural
   /// reading order for a page with mixed horizontal dialogue.
+  ///
+  /// ### ML Kit first-run model download handling
+  ///
+  /// The Japanese text-recognition model is an **optional Play Services
+  /// module**. On the very first run the underlying service throws a
+  /// `PlatformException(TextRecognizerError, "Waiting for the text
+  /// optional module to be downloaded")` for a few seconds while the
+  /// package manager pulls the model. We treat this transient error
+  /// specially: log a "Preparing OCR model…" notice and retry up to
+  /// [_maxModelDownloadRetries] with a short sleep between attempts,
+  /// so the pipeline succeeds on the same run instead of surfacing a
+  /// hard failure to the user.
   Future<List<TextBox>> processImage({
     Uint8List? bytes,
     String? filePath,
@@ -85,44 +97,91 @@ class OCRService {
 
     try {
       // ── Stage 2: Input image loaded ──────────────────────────────
-      final InputImage inputImage;
-      if (filePath != null && File(filePath).existsSync()) {
-        inputImage = InputImage.fromFilePath(filePath);
-        LoggerService.instance.log(
-          'OCR input image loaded from file: $filePath',
-          source: _tag,
-        );
-      } else if (bytes != null) {
-        if (imageWidth == null || imageHeight == null) {
-          throw ArgumentError(
-            'When passing bytes you must also provide imageWidth + imageHeight',
-          );
-        }
-        inputImage = InputImage.fromBytes(
-          bytes: bytes,
-          metadata: InputImageMetadata(
-            size: Size(imageWidth.toDouble(), imageHeight.toDouble()),
-            rotation: InputImageRotation.rotation0deg,
-            format: InputImageFormat.nv21,
-            bytesPerRow: 0,
-          ),
-        );
-        LoggerService.instance.log(
-          'OCR input image loaded from bytes (${imageWidth}x$imageHeight)',
-          source: _tag,
-        );
-      } else {
-        throw StateError('Unreachable: bytes and filePath are both null');
-      }
+      // Prepared ONCE before the retry loop (file bytes don't change
+      // between model-download retries).
+      final InputImage inputImage = _buildInputImage(
+        filePath: filePath,
+        bytes: bytes,
+        imageWidth: imageWidth,
+        imageHeight: imageHeight,
+      );
       AppLogger.info('OCR InputImage prepared', tag: _tag);
 
-      // ── Stage 3: Text recognition started ─────────────────────────
-      LoggerService.instance.log('OCR text recognition started (Japanese script)', source: _tag);
-      AppLogger.info('OCR processImage() call to ML Kit recognizer', tag: _tag);
+      // ── Stage 3: Text recognition with optional-model retry loop ─
+      const int maxModelDownloadRetries = 3;
+      const Duration retryDelay = Duration(seconds: 2);
+      RecognizedText? result;
+      PlatformException? lastException;
 
-      final RecognizedText result = await _recognizer.processImage(inputImage);
+      for (int attempt = 0; attempt <= maxModelDownloadRetries; attempt++) {
+        if (attempt > 0) {
+          LoggerService.instance.log(
+            'Preparing OCR model… retrying in $retryDelay (attempt $attempt/$maxModelDownloadRetries)',
+            source: _tag,
+          );
+          AppLogger.info(
+            'OCR model not yet available — waiting ${retryDelay.inSeconds}s '
+            'before retry $attempt/$maxModelDownloadRetries',
+            tag: _tag,
+          );
+          await Future.delayed(retryDelay);
+          LoggerService.instance.log(
+            'OCR text recognition retry started (attempt $attempt/$maxModelDownloadRetries, Japanese script)',
+            source: _tag,
+          );
+        } else {
+          LoggerService.instance.log(
+            'OCR text recognition started (Japanese script)',
+            source: _tag,
+          );
+        }
+        AppLogger.info(
+          'OCR processImage() call to ML Kit recognizer (attempt=$attempt)',
+          tag: _tag,
+        );
 
-      // ── Stage 4–6: Aggregate metrics ──────────────────────────────
+        try {
+          result = await _recognizer.processImage(inputImage);
+          lastException = null;
+          break; // success
+        } on PlatformException catch (e) {
+          lastException = e;
+          final bool isTransientModelDownload =
+              e.code == 'TextRecognizerError' &&
+                  (e.message ?? '').contains('optional module to be downloaded');
+          if (!isTransientModelDownload) rethrow;
+          if (attempt >= maxModelDownloadRetries) {
+            LoggerService.instance.log(
+              'OCR model still not ready after $maxModelDownloadRetries retries → failing',
+              source: _tag,
+            );
+            AppLogger.warning(
+              'OCR model download timed out after $maxModelDownloadRetries retries',
+              tag: _tag,
+            );
+            rethrow;
+          }
+          // Loop again → delay → retry
+        }
+      }
+
+      if (result == null) {
+        // Defensive: loop exited without producing a result and without
+        // rethrowing. Re-throw the last captured exception to avoid
+        // silently returning null.
+        if (lastException != null) {
+          // `PlatformException` does not expose `.stackTrace` as a public
+          // getter on every Flutter version. Since we are re-throwing a
+          // freshly constructed error, we capture the current stack
+          // trace (which preserves the Dart-side call chain of
+          // `processImage`) and attach it manually.
+          // ignore: only_throw_errors
+          throw lastException;
+        }
+        throw StateError('OCR processImage produced null result unexpectedly');
+      }
+
+      // ── Stage 4–6: Aggregate metrics ────────────────────────────
       final List<TextBox> boxes = [];
       int totalLines = 0;
       int totalChars = 0;
@@ -161,7 +220,7 @@ class OCRService {
         return a.left.compareTo(b.left);
       });
 
-      // ── Stage 4–6 log emission ────────────────────────────────────
+      // ── Stage 4–6 log emission ──────────────────────────────────
       LoggerService.instance.log(
         'OCR blocks detected: ${boxes.length}',
         source: _tag,
@@ -180,7 +239,7 @@ class OCRService {
         tag: _tag,
       );
 
-      // ── Stage 7: OCR completed ────────────────────────────────────
+      // ── Stage 7: OCR completed ──────────────────────────────────
       stopwatch.stop();
       LoggerService.instance.log(
         'OCR completed in ${stopwatch.elapsedMilliseconds}ms → $boxes.length boxes, $totalChars chars',
@@ -211,5 +270,45 @@ class OCRService {
       );
       rethrow;
     }
+  }
+
+  // ── Helpers ────────────────────────────────────────────────────────
+
+  /// Builds the ML Kit [InputImage] once. Extracted so the retry loop
+  /// above can re-invoke `processImage()` repeatedly without
+  /// re-reading files or re-computing metadata.
+  InputImage _buildInputImage({
+    required String? filePath,
+    required Uint8List? bytes,
+    required int? imageWidth,
+    required int? imageHeight,
+  }) {
+    if (filePath != null && File(filePath).existsSync()) {
+      LoggerService.instance.log(
+        'OCR input image loaded from file: $filePath',
+        source: _tag,
+      );
+      return InputImage.fromFilePath(filePath);
+    } else if (bytes != null) {
+      if (imageWidth == null || imageHeight == null) {
+        throw ArgumentError(
+          'When passing bytes you must also provide imageWidth + imageHeight',
+        );
+      }
+      LoggerService.instance.log(
+        'OCR input image loaded from bytes (${imageWidth}x$imageHeight)',
+        source: _tag,
+      );
+      return InputImage.fromBytes(
+        bytes: bytes,
+        metadata: InputImageMetadata(
+          size: Size(imageWidth.toDouble(), imageHeight.toDouble()),
+          rotation: InputImageRotation.rotation0deg,
+          format: InputImageFormat.nv21,
+          bytesPerRow: 0,
+        ),
+      );
+    }
+    throw StateError('Unreachable: bytes and filePath are both null');
   }
 }
