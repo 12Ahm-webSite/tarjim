@@ -23,6 +23,10 @@ import '../models/translated_text_box.dart';
 ///
 /// This service is intentionally side-effect free: it does not touch any
 /// MethodChannels, does not hold UI state, and does not render overlays.
+///
+/// **Concurrency**: This service does NOT guard against parallel calls.
+/// The caller ([AppController]) is responsible for ensuring only one
+/// `translateBoxes` call is active at a time via `_translationInProgress`.
 class TranslationService {
   static const _tag = 'TranslationService';
 
@@ -44,9 +48,6 @@ class TranslationService {
       OnDeviceTranslatorModelManager();
 
   bool _disposed = false;
-
-  /// Guard: prevents parallel translation runs.
-  bool _isRunning = false;
 
   /// Maximum retry attempts for model download.
   static const int _maxDownloadRetries = 3;
@@ -80,21 +81,11 @@ class TranslationService {
   /// need to be downloaded from Google Play Services. This method
   /// handles the download automatically and logs progress.
   Future<List<TranslatedTextBox>> translateBoxes(List<TextBox> boxes) async {
+    LoggerService.instance.log('translateBoxes() CALLED', source: _tag);
+    AppLogger.info('translateBoxes() CALLED with ${boxes.length} boxes', tag: _tag);
+
     if (_disposed) {
       throw StateError('TranslationService.translateBoxes called after dispose()');
-    }
-
-    // ── Guard: prevent parallel runs ─────────────────────────────────
-    if (_isRunning) {
-      AppLogger.warning(
-        'translateBoxes called while already running — skipping',
-        tag: _tag,
-      );
-      LoggerService.instance.log(
-        'Translation skipped: already in progress',
-        source: _tag,
-      );
-      return [];
     }
 
     if (boxes.isEmpty) {
@@ -102,99 +93,99 @@ class TranslationService {
       return [];
     }
 
-    _isRunning = true;
+    final stopwatch = Stopwatch()..start();
 
-    try {
-      final stopwatch = Stopwatch()..start();
+    // ── Stage 1: Log start ─────────────────────────────────────────
+    LoggerService.instance.log('Translation started...', source: _tag);
+    AppLogger.info('Translation started...', tag: _tag);
 
-      // ── Stage 1: Log start ─────────────────────────────────────────
-      LoggerService.instance.log('Translation started...', source: _tag);
-      AppLogger.info('Translation started...', tag: _tag);
+    // ── Stage 2: Ensure all 3 models are available ─────────────────
+    LoggerService.instance.log('ensureModelsDownloaded START', source: _tag);
+    AppLogger.info('ensureModelsDownloaded START', tag: _tag);
 
-      // ── Stage 2: Ensure all 3 models are available ─────────────────
-      await _ensureModelsDownloaded();
+    await _ensureModelsDownloaded();
 
-      // ── Stage 3: Translate each box (ja → en → ar) ─────────────────
-      LoggerService.instance.log(
-        'Translating ${boxes.length} text boxes...',
-        source: _tag,
-      );
-      AppLogger.info('Translating ${boxes.length} text boxes...', tag: _tag);
+    LoggerService.instance.log('ensureModelsDownloaded END', source: _tag);
+    AppLogger.info('ensureModelsDownloaded END', tag: _tag);
 
-      final List<TranslatedTextBox> results = [];
+    // ── Stage 3: Translate each box (ja → en → ar) ─────────────────
+    LoggerService.instance.log(
+      'translation START — ${boxes.length} text boxes',
+      source: _tag,
+    );
+    AppLogger.info('translation START — ${boxes.length} text boxes', tag: _tag);
 
-      for (int i = 0; i < boxes.length; i++) {
-        final box = boxes[i];
-        if (box.isEmpty) continue;
+    final List<TranslatedTextBox> results = [];
 
-        try {
-          // Step 1: Japanese → English
-          final english = await _jaToEn.translateText(box.text);
+    for (int i = 0; i < boxes.length; i++) {
+      final box = boxes[i];
+      if (box.isEmpty) continue;
 
-          // Step 2: English → Arabic
-          final arabic = await _enToAr.translateText(english);
+      try {
+        // Step 1: Japanese → English
+        final english = await _jaToEn.translateText(box.text);
 
-          results.add(TranslatedTextBox(
-            originalText: box.text,
-            translatedText: arabic,
-            imageWidth: box.imageWidth,
-            imageHeight: box.imageHeight,
-            left: box.left,
-            top: box.top,
-            width: box.width,
-            height: box.height,
-            confidence: box.confidence,
-          ));
+        // Step 2: English → Arabic
+        final arabic = await _enToAr.translateText(english);
 
-          // Per-box debug log
-          AppLogger.debug(
-            '  [${i + 1}/${boxes.length}] '
-            'Original: ${box.text}\n'
-            '    → English: $english\n'
-            '    → Arabic: $arabic\n'
-            '    BoundingBox: (${box.left.toStringAsFixed(0)}, ${box.top.toStringAsFixed(0)}, '
-            '${box.width.toStringAsFixed(0)}x${box.height.toStringAsFixed(0)})',
-            tag: _tag,
-          );
-          LoggerService.instance.log(
-            'Box ${i + 1}/${boxes.length} — '
-            'Original: ${box.text} | '
-            'English: $english | '
-            'Arabic: $arabic | '
-            'BoundingBox: (${box.left.toStringAsFixed(0)}, ${box.top.toStringAsFixed(0)}, '
-            '${box.width.toStringAsFixed(0)}x${box.height.toStringAsFixed(0)})',
-            source: _tag,
-          );
-        } catch (e) {
-          // Log the failure for this box but continue with remaining boxes
-          AppLogger.warning(
-            'Translation failed for box ${i + 1}/${boxes.length}: $e — '
-            'text="${box.text}"',
-            tag: _tag,
-          );
-          LoggerService.instance.log(
-            'Translation failed for box ${i + 1}: ${e.runtimeType}: $e',
-            source: _tag,
-          );
-        }
+        results.add(TranslatedTextBox(
+          originalText: box.text,
+          translatedText: arabic,
+          imageWidth: box.imageWidth,
+          imageHeight: box.imageHeight,
+          left: box.left,
+          top: box.top,
+          width: box.width,
+          height: box.height,
+          confidence: box.confidence,
+        ));
+
+        // Per-box debug log
+        AppLogger.debug(
+          '  [${i + 1}/${boxes.length}] '
+          'Original: ${box.text}\n'
+          '    → English: $english\n'
+          '    → Arabic: $arabic\n'
+          '    BoundingBox: (${box.left.toStringAsFixed(0)}, ${box.top.toStringAsFixed(0)}, '
+          '${box.width.toStringAsFixed(0)}x${box.height.toStringAsFixed(0)})',
+          tag: _tag,
+        );
+        LoggerService.instance.log(
+          'Box ${i + 1}/${boxes.length} — '
+          'Original: ${box.text} | '
+          'English: $english | '
+          'Arabic: $arabic | '
+          'BoundingBox: (${box.left.toStringAsFixed(0)}, ${box.top.toStringAsFixed(0)}, '
+          '${box.width.toStringAsFixed(0)}x${box.height.toStringAsFixed(0)})',
+          source: _tag,
+        );
+      } catch (e) {
+        // Log the failure for this box but continue with remaining boxes
+        AppLogger.warning(
+          'Translation failed for box ${i + 1}/${boxes.length}: $e — '
+          'text="${box.text}"',
+          tag: _tag,
+        );
+        LoggerService.instance.log(
+          'Translation failed for box ${i + 1}: ${e.runtimeType}: $e',
+          source: _tag,
+        );
       }
-
-      // ── Stage 4: Log completion ────────────────────────────────────
-      stopwatch.stop();
-      LoggerService.instance.log(
-        'Translation completed in ${stopwatch.elapsedMilliseconds} ms',
-        source: _tag,
-      );
-      AppLogger.info(
-        'Translation completed in ${stopwatch.elapsedMilliseconds} ms — '
-        '${results.length}/${boxes.length} boxes translated',
-        tag: _tag,
-      );
-
-      return results;
-    } finally {
-      _isRunning = false;
     }
+
+    // ── Stage 4: Log completion ────────────────────────────────────
+    stopwatch.stop();
+    LoggerService.instance.log(
+      'translation END — completed in ${stopwatch.elapsedMilliseconds} ms',
+      source: _tag,
+    );
+    AppLogger.info(
+      'translation END — completed in ${stopwatch.elapsedMilliseconds} ms — '
+      '${results.length}/${boxes.length} boxes translated',
+      tag: _tag,
+    );
+
+    return results;
   }
 
   // ── Helpers ────────────────────────────────────────────────────────
