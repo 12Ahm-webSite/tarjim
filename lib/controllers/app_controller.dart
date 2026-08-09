@@ -8,10 +8,12 @@ import 'package:flutter/services.dart';
 import '../core/utils/logger.dart';
 import '../core/utils/logger_service.dart';
 import '../models/text_box.dart';
+import '../models/translated_text_box.dart';
 import '../services/media_projection_service.dart';
 import '../services/ocr_service.dart';
 import '../services/overlay_service.dart';
 import '../services/permission_service.dart';
+import '../services/translation_service.dart';
 
 /// Lifecycle state of each pipeline stage, mirrored by the status cards.
 enum ServiceStatus { idle, granted, denied, running, error }
@@ -28,6 +30,7 @@ class AppController extends ChangeNotifier {
   final MediaProjectionService _mediaProjection = MediaProjectionService();
   final OverlayService _overlay = OverlayService();
   final OCRService _ocr = OCRService();
+  final TranslationService _translation = TranslationService();
 
   // ─── Pipeline statuses ───────────────────────────────────────────
   ServiceStatus screenCaptureStatus = ServiceStatus.idle;
@@ -40,12 +43,13 @@ class AppController extends ChangeNotifier {
 
   bool _capturePending = false;
   bool _ocrInProgress = false;
+  bool _translationInProgress = false;
 
   /// A capture request is awaiting consent or a frame.
   bool get capturePending => _capturePending;
 
   /// True while any stage is in flight (disables Start button).
-  bool get isBusy => _isTranslating || _capturePending || _ocrInProgress;
+  bool get isBusy => _isTranslating || _capturePending || _ocrInProgress || _translationInProgress;
 
   /// Last pipeline error, surfaced to the UI as a SnackBar message.
   String? lastError;
@@ -69,9 +73,17 @@ class AppController extends ChangeNotifier {
   /// reached yet (check [ocrStatus] to distinguish).
   List<TextBox> lastOcrResult = [];
 
+  // ─── Translation results (Step 8) ────────────────────────────────
+  /// Translated text boxes produced by the translation stage.
+  ///
+  /// Each entry pairs the original Japanese text with its Arabic
+  /// translation and preserves the bounding box coordinates from OCR.
+  List<TranslatedTextBox> lastTranslationResult = [];
+
   @override
   void dispose() {
     _ocr.dispose();
+    _translation.dispose();
     super.dispose();
   }
 
@@ -103,19 +115,22 @@ class AppController extends ChangeNotifier {
     await refreshStatuses();
   }
 
-  /// Full Step 6 → Step 7 pipeline:
+  /// Full Step 6 → Step 7 → Step 8 pipeline:
   ///   Overlay permission check
   ///   → MediaProjection consent dialog
   ///   → Foreground service + single screenshot
   ///   → PNG bytes decoded
   ///   → Japanese OCR via ML Kit
-  ///   → **STOP** (no Translation / Overlay yet).
+  ///   → Japanese → Arabic translation via ML Kit
+  ///   → **STOP** (no Overlay yet).
   ///
   /// After this method returns, callers can read:
   ///   * [screenCaptureStatus] — screenshot outcome
   ///   * [lastCapture] + [lastCapturePath] — raw image payload
   ///   * [ocrStatus] — OCR outcome
   ///   * [lastOcrResult] — structured list of detected text regions
+  ///   * [translationStatus] — translation outcome
+  ///   * [lastTranslationResult] — translated text boxes
   ///
   /// Returns an error message for the UI SnackBar, or `null` on success.
   Future<String?> startTranslation() async {
@@ -216,6 +231,7 @@ class AppController extends ChangeNotifier {
         lastOcrResult = boxes;
         // After OCR SUCCESS:
         //   ocrStatus := Granted
+        //   translationStatus := Running  ← translation is about to begin
         ocrStatus = ServiceStatus.granted;
         AppLogger.info(
           'Step 7 OCR OK: stored ${boxes.length} boxes in lastOcrResult',
@@ -225,8 +241,44 @@ class AppController extends ChangeNotifier {
           'OCR pipeline step completed: ${boxes.length} boxes stored',
           source: _tag,
         );
+        notifyListeners();
+
+        // ── Step 8: Translation (Japanese → Arabic) ────────────────
+        LoggerService.instance.log('Advancing pipeline to Step 8 (Translation)', source: _tag);
+        _translationInProgress = true;
+        translationStatus = ServiceStatus.running;
+        notifyListeners();
+
+        try {
+          final translatedBoxes = await _translation.translateBoxes(boxes);
+          lastTranslationResult = translatedBoxes;
+
+          // After Translation SUCCESS:
+          //   translationStatus := Granted
+          translationStatus = ServiceStatus.granted;
+          AppLogger.info(
+            'Step 8 Translation OK: ${translatedBoxes.length} boxes translated',
+            tag: _tag,
+          );
+          LoggerService.instance.log(
+            'Translation pipeline step completed: ${translatedBoxes.length} boxes translated',
+            source: _tag,
+          );
+        } catch (e) {
+          lastTranslationResult = [];
+          translationStatus = ServiceStatus.error;
+          lastError = lastError ?? 'Translation failed: ${e.runtimeType}';
+          AppLogger.warning('Step 8 Translation failed: $e', tag: _tag);
+          LoggerService.instance.log(
+            'Translation pipeline step failed: ${e.runtimeType}: $e',
+            source: _tag,
+          );
+        } finally {
+          _translationInProgress = false;
+        }
       } catch (e) {
         lastOcrResult = [];
+        lastTranslationResult = [];
         ocrStatus = ServiceStatus.error;
         lastError = lastError ?? 'OCR failed: ${e.runtimeType}';
         AppLogger.warning('Step 7 OCR failed: $e', tag: _tag);
@@ -240,6 +292,7 @@ class AppController extends ChangeNotifier {
     } on PlatformException catch (e) {
       _capturePending = false;
       _ocrInProgress = false;
+      _translationInProgress = false;
       lastCapture = null;
       screenCaptureStatus = switch (e.code) {
         'DENIED' => ServiceStatus.denied,
@@ -247,7 +300,9 @@ class AppController extends ChangeNotifier {
         _ => ServiceStatus.error,
       };
       ocrStatus = ServiceStatus.idle;
+      translationStatus = ServiceStatus.idle;
       lastOcrResult = [];
+      lastTranslationResult = [];
       lastError = e.message ?? 'Capture failed (${e.code}).';
       AppLogger.warning(
         'Capture failed [${e.code}]: ${e.message}',
@@ -256,7 +311,8 @@ class AppController extends ChangeNotifier {
     } finally {
       _capturePending = false;
       _ocrInProgress = false;
-      LoggerService.instance.log('capturePending reset, ocrInProgress reset', source: 'AppController');
+      _translationInProgress = false;
+      LoggerService.instance.log('capturePending reset, ocrInProgress reset, translationInProgress reset', source: 'AppController');
       notifyListeners();
     }
     return lastError;
@@ -279,6 +335,7 @@ class AppController extends ChangeNotifier {
     await _overlay.hideOverlay();
     _isTranslating = false;
     _ocrInProgress = false;
+    _translationInProgress = false;
     ocrStatus = ServiceStatus.idle;
     translationStatus = ServiceStatus.idle;
     if (!_capturePending) {
