@@ -7,8 +7,10 @@ import '../controllers/app_controller.dart';
 import '../core/constants/app_constants.dart';
 import '../core/theme/app_theme.dart';
 import '../core/utils/logger_service.dart';
+import '../models/translated_text_box.dart';
 import '../widgets/app_button.dart';
 import '../widgets/status_card.dart';
+import '../widgets/translation_overlay.dart';
 import 'permissions_screen.dart';
 import 'settings_screen.dart';
 
@@ -72,6 +74,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         builder: (_) => _CapturePreviewSheet(
           bytes: capture,
           filePath: _controller.lastCapturePath ?? '',
+          translatedBoxes: _controller.lastTranslationResult,
         ),
       );
     }
@@ -242,10 +245,12 @@ class _CapturePreviewSheet extends StatefulWidget {
   const _CapturePreviewSheet({
     required this.bytes,
     required this.filePath,
+    this.translatedBoxes = const [],
   });
 
   final Uint8List bytes;
   final String filePath;
+  final List<TranslatedTextBox> translatedBoxes;
 
   @override
   State<_CapturePreviewSheet> createState() => _CapturePreviewSheetState();
@@ -364,36 +369,47 @@ class _CapturePreviewSheetState extends State<_CapturePreviewSheet> {
                       minScale: 0.5,
                       maxScale: 5,
                       boundaryMargin: const EdgeInsets.all(20),
-                      child: Image.memory(
-                        widget.bytes,
-                        fit: BoxFit.contain,
-                        gaplessPlayback: true,
-                        errorBuilder: (ctx, err, _) => Padding(
-                          padding: const EdgeInsets.all(20),
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(
-                                Icons.broken_image_rounded,
-                                size: 44,
-                                color: theme.colorScheme.error,
+                      child: LayoutBuilder(
+                        builder: (context, imageConstraints) {
+                          if (widget.translatedBoxes.isNotEmpty) {
+                            return MeasuredTranslationOverlay(
+                              imageBytes: widget.bytes,
+                              boxes: widget.translatedBoxes,
+                              containerConstraints: imageConstraints,
+                            );
+                          }
+                          return Image.memory(
+                            widget.bytes,
+                            fit: BoxFit.contain,
+                            gaplessPlayback: true,
+                            errorBuilder: (ctx, err, _) => Padding(
+                              padding: const EdgeInsets.all(20),
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    Icons.broken_image_rounded,
+                                    size: 44,
+                                    color: theme.colorScheme.error,
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    'Preview unavailable',
+                                    style: theme.textTheme.bodyMedium?.copyWith(
+                                      color: theme.colorScheme.error,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    err.toString(),
+                                    style: theme.textTheme.bodySmall,
+                                    textAlign: TextAlign.center,
+                                  ),
+                                ],
                               ),
-                              const SizedBox(height: 8),
-                              Text(
-                                'Preview unavailable',
-                                style: theme.textTheme.bodyMedium?.copyWith(
-                                  color: theme.colorScheme.error,
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                err.toString(),
-                                style: theme.textTheme.bodySmall,
-                                textAlign: TextAlign.center,
-                              ),
-                            ],
-                          ),
-                        ),
+                            ),
+                          );
+                        },
                       ),
                     ),
                   ),
@@ -461,9 +477,14 @@ class _CapturePreviewSheetState extends State<_CapturePreviewSheet> {
                         const SizedBox(width: 10),
                         Expanded(
                           child: Text(
-                            'Step 6 verified — MediaProjection successfully '
-                            'captured one frame and delivered PNG bytes to '
-                            'Flutter through the MethodChannel.',
+                            widget.translatedBoxes.isNotEmpty
+                                ? 'Step 9 verified — Full pipeline complete: '
+                                  'Capture → OCR → Translation → Display. '
+                                  '${widget.translatedBoxes.length} translated '
+                                  'text boxes rendered on the captured image.'
+                                : 'Step 6 verified — MediaProjection successfully '
+                                  'captured one frame and delivered PNG bytes to '
+                                  'Flutter through the MethodChannel.',
                             style: theme.textTheme.bodySmall?.copyWith(
                               color: theme.colorScheme.onPrimaryContainer,
                               fontWeight: FontWeight.w600,
