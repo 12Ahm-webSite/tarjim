@@ -1,6 +1,6 @@
-
 import 'package:google_mlkit_translation/google_mlkit_translation.dart';
 
+import '../core/constants/app_constants.dart';
 import '../core/utils/logger.dart';
 import '../core/utils/logger_service.dart';
 import '../models/text_box.dart';
@@ -11,18 +11,14 @@ import '../models/translated_text_box.dart';
 /// Uses explicit two-step translation:
 ///   Japanese → English → Arabic
 ///
-/// This mirrors the pipeline that was previously proven to work and gives
-/// us full control over model downloads (ja + en + ar) rather than
-/// relying on ML Kit's implicit English pivot.
-///
 /// Responsible for:
-///   1. Ensuring all 3 language models (ja, en, ar) are downloaded.
+///   1. Verifying that required translation models (ja, en, ar) are installed.
 ///   2. Translating each [TextBox.text]: Japanese → English → Arabic.
 ///   3. Returning a [TranslatedTextBox] list with identical bounding boxes.
 ///   4. Resource cleanup on [dispose].
 ///
-/// This service is intentionally side-effect free: it does not touch any
-/// MethodChannels, does not hold UI state, and does not render overlays.
+/// **Design Rule**: This service MUST NEVER initiate network downloads.
+/// Model installation is handled independently by [TranslationModelManager].
 ///
 /// **Concurrency**: This service does NOT guard against parallel calls.
 /// The caller ([AppController]) is responsible for ensuring only one
@@ -43,14 +39,11 @@ class TranslationService {
     targetLanguage: TranslateLanguage.arabic,
   );
 
-  /// Model manager for downloading / checking language models.
+  /// Model manager used strictly for checking local model availability.
   final OnDeviceTranslatorModelManager _modelManager =
       OnDeviceTranslatorModelManager();
 
   bool _disposed = false;
-
-  /// Maximum retry attempts for model download.
-  static const int _maxDownloadRetries = 3;
 
   // ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -77,9 +70,8 @@ class TranslationService {
   /// bounding coordinates as the input. Boxes with empty text are
   /// skipped (their indices are dropped from the result).
   ///
-  /// On the very first invocation the underlying language models may
-  /// need to be downloaded from Google Play Services. This method
-  /// handles the download automatically and logs progress.
+  /// Fails immediately with [StateError] if any required model is not installed.
+  /// Does NOT trigger any downloads.
   Future<List<TranslatedTextBox>> translateBoxes(List<TextBox> boxes) async {
     LoggerService.instance.log('translateBoxes() CALLED', source: _tag);
     AppLogger.info('translateBoxes() CALLED with ${boxes.length} boxes', tag: _tag);
@@ -95,20 +87,31 @@ class TranslationService {
 
     final stopwatch = Stopwatch()..start();
 
-    // ── Stage 1: Log start ─────────────────────────────────────────
-    LoggerService.instance.log('Translation started...', source: _tag);
-    AppLogger.info('Translation started...', tag: _tag);
+    // ── Stage 1: Verify model availability (No download) ───────────
+    LoggerService.instance.log('Checking required translation models availability...', source: _tag);
+    AppLogger.info('Checking required translation models availability...', tag: _tag);
 
-    // ── Stage 2: Ensure all 3 models are available ─────────────────
-    LoggerService.instance.log('ensureModelsDownloaded START', source: _tag);
-    AppLogger.info('ensureModelsDownloaded START', tag: _tag);
+    final jaReady = await _modelManager.isModelDownloaded(AppConstants.sourceLanguageJapanese);
+    final enReady = await _modelManager.isModelDownloaded(AppConstants.sourceLanguageEnglish);
+    final arReady = await _modelManager.isModelDownloaded(AppConstants.targetLanguageArabic);
 
-    await _ensureModelsDownloaded();
+    if (!jaReady || !enReady || !arReady) {
+      final missing = <String>[
+        if (!jaReady) 'Japanese (${AppConstants.sourceLanguageJapanese})',
+        if (!enReady) 'English (${AppConstants.sourceLanguageEnglish})',
+        if (!arReady) 'Arabic (${AppConstants.targetLanguageArabic})',
+      ];
+      final errorMsg = 'Required translation models are missing: ${missing.join(', ')}. '
+          'Please download them in the Translation Models section before translating.';
+      LoggerService.instance.log(errorMsg, source: _tag, level: 'WARN');
+      AppLogger.warning(errorMsg, tag: _tag);
+      throw StateError(errorMsg);
+    }
 
-    LoggerService.instance.log('ensureModelsDownloaded END', source: _tag);
-    AppLogger.info('ensureModelsDownloaded END', tag: _tag);
+    LoggerService.instance.log('All required translation models verified present on disk ✓', source: _tag);
+    AppLogger.info('All required translation models verified present on disk ✓', tag: _tag);
 
-    // ── Stage 3: Translate each box (ja → en → ar) ─────────────────
+    // ── Stage 2: Translate each box (ja → en → ar) ─────────────────
     LoggerService.instance.log(
       'translation START — ${boxes.length} text boxes',
       source: _tag,
@@ -173,7 +176,7 @@ class TranslationService {
       }
     }
 
-    // ── Stage 4: Log completion ────────────────────────────────────
+    // ── Stage 3: Log completion ────────────────────────────────────
     stopwatch.stop();
     LoggerService.instance.log(
       'translation END — completed in ${stopwatch.elapsedMilliseconds} ms',
@@ -186,154 +189,5 @@ class TranslationService {
     );
 
     return results;
-  }
-
-  // ── Helpers ────────────────────────────────────────────────────────
-
-  /// Downloads all 3 language models sequentially: ja → en → ar.
-  ///
-  /// For each model:
-  ///   1. Check if already downloaded
-  ///   2. If not, download with up to [_maxDownloadRetries] attempts
-  ///   3. Verify with [isModelDownloaded] after download
-  Future<void> _ensureModelsDownloaded() async {
-    final jaCode = TranslateLanguage.japanese.bcpCode;
-    final enCode = TranslateLanguage.english.bcpCode;
-    final arCode = TranslateLanguage.arabic.bcpCode;
-
-    LoggerService.instance.log(
-      'Checking all 3 translation models (ja, en, ar)...',
-      source: _tag,
-    );
-
-    await _ensureSingleModel(jaCode, 'Japanese (ja)');
-    await _ensureSingleModel(enCode, 'English (en)');
-    await _ensureSingleModel(arCode, 'Arabic (ar)');
-
-    LoggerService.instance.log(
-      'All 3 translation models ready',
-      source: _tag,
-    );
-    AppLogger.info('All 3 translation models ready', tag: _tag);
-  }
-
-  /// Checks and downloads a single language model with retry and
-  /// verification.
-  Future<void> _ensureSingleModel(String bcpCode, String label) async {
-    // ── Check ────────────────────────────────────────────────────────
-    LoggerService.instance.log(
-      'Checking $label model',
-      source: _tag,
-    );
-    AppLogger.info('Checking $label model', tag: _tag);
-
-    final alreadyDownloaded = await _modelManager.isModelDownloaded(bcpCode);
-
-    if (alreadyDownloaded) {
-      LoggerService.instance.log(
-        '$label already downloaded ✓',
-        source: _tag,
-      );
-      AppLogger.info('$label already downloaded ✓', tag: _tag);
-      return;
-    }
-
-    LoggerService.instance.log(
-      '$label not downloaded — starting download',
-      source: _tag,
-    );
-    AppLogger.info('$label not downloaded — starting download', tag: _tag);
-
-    // ── Download with retry ──────────────────────────────────────────
-    for (int attempt = 1; attempt <= _maxDownloadRetries; attempt++) {
-      LoggerService.instance.log(
-        'Starting $label download (attempt $attempt/$_maxDownloadRetries)',
-        source: _tag,
-      );
-      AppLogger.info(
-        'Starting $label download (attempt $attempt/$_maxDownloadRetries)',
-        tag: _tag,
-      );
-
-      try {
-        final success = await _modelManager.downloadModel(bcpCode);
-
-        if (!success) {
-          AppLogger.warning(
-            '$label downloadModel returned false (attempt $attempt/$_maxDownloadRetries)',
-            tag: _tag,
-          );
-          LoggerService.instance.log(
-            '$label download returned false (attempt $attempt/$_maxDownloadRetries)',
-            source: _tag,
-          );
-
-          if (attempt >= _maxDownloadRetries) {
-            throw StateError(
-              '$label model download failed after $_maxDownloadRetries attempts '
-              '(downloadModel returned false)',
-            );
-          }
-
-          // Wait before retry
-          await Future.delayed(const Duration(seconds: 2));
-          continue;
-        }
-      } catch (e) {
-        if (e is StateError) rethrow;
-
-        AppLogger.warning(
-          '$label download threw exception (attempt $attempt/$_maxDownloadRetries): '
-          '${e.runtimeType}: $e',
-          tag: _tag,
-        );
-        LoggerService.instance.log(
-          '$label download exception (attempt $attempt/$_maxDownloadRetries): '
-          '${e.runtimeType}: $e',
-          source: _tag,
-        );
-
-        if (attempt >= _maxDownloadRetries) {
-          throw StateError(
-            '$label model download failed after $_maxDownloadRetries attempts: $e',
-          );
-        }
-
-        // Wait before retry
-        await Future.delayed(const Duration(seconds: 2));
-        continue;
-      }
-
-      // ── Verify after download ────────────────────────────────────
-      final verified = await _modelManager.isModelDownloaded(bcpCode);
-      if (verified) {
-        LoggerService.instance.log(
-          '$label download completed ✓ (verified)',
-          source: _tag,
-        );
-        AppLogger.info('$label download completed ✓ (verified)', tag: _tag);
-        return;
-      }
-
-      AppLogger.warning(
-        '$label downloadModel succeeded but isModelDownloaded is still false '
-        '(attempt $attempt/$_maxDownloadRetries)',
-        tag: _tag,
-      );
-      LoggerService.instance.log(
-        '$label download succeeded but verification failed '
-        '(attempt $attempt/$_maxDownloadRetries)',
-        source: _tag,
-      );
-
-      if (attempt >= _maxDownloadRetries) {
-        throw StateError(
-          '$label model verification failed after $_maxDownloadRetries attempts',
-        );
-      }
-
-      // Wait before retry
-      await Future.delayed(const Duration(seconds: 2));
-    }
   }
 }

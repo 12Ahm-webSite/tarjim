@@ -12,10 +12,22 @@ void main() {
     expect(find.text('Screen Capture'), findsOneWidget);
 
     await tester.scrollUntilVisible(
-      find.text('Request Permissions'),
+      find.text('Translation Models'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.text('Translation Models'), findsOneWidget);
+    expect(find.text('Japanese'), findsOneWidget);
+    expect(find.text('English'), findsOneWidget);
+    expect(find.text('Arabic'), findsOneWidget);
+
+    await tester.scrollUntilVisible(
+      find.text('Start Translation'),
       200,
       scrollable: find.byType(Scrollable).first,
     );
     expect(find.text('Request Permissions'), findsOneWidget);
+    expect(find.text('Start Translation'), findsOneWidget);
   });
 }
+

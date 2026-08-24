@@ -10,6 +10,7 @@ import '../core/utils/logger_service.dart';
 import '../models/translated_text_box.dart';
 import '../widgets/app_button.dart';
 import '../widgets/status_card.dart';
+import '../widgets/translation_models_section.dart';
 import '../widgets/translation_overlay.dart';
 import 'permissions_screen.dart';
 import 'settings_screen.dart';
@@ -143,7 +144,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 ),
               ],
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: 16),
+            TranslationModelsSection(controller: _controller),
+            const SizedBox(height: 20),
             AppButton(
               label: 'Request Permissions',
               icon: Icons.verified_user_rounded,

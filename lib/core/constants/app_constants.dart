@@ -1,3 +1,5 @@
+import '../../models/translation_model_config.dart';
+
 /// Application-wide constants for Tarjim.
 ///
 /// Centralizes strings and configuration values so they are never
@@ -17,9 +19,32 @@ abstract final class AppConstants {
   static const String sourceLanguageEnglish = 'en';
   static const String targetLanguageArabic = 'ar';
 
+  /// Central list of supported translation models.
+  static const List<TranslationModelConfig> supportedTranslationModels = [
+    TranslationModelConfig(
+      code: sourceLanguageJapanese,
+      name: 'Japanese',
+      nativeName: '日本語',
+      isRequired: true,
+    ),
+    TranslationModelConfig(
+      code: sourceLanguageEnglish,
+      name: 'English',
+      nativeName: 'English',
+      isRequired: true,
+    ),
+    TranslationModelConfig(
+      code: targetLanguageArabic,
+      name: 'Arabic',
+      nativeName: 'العربية',
+      isRequired: true,
+    ),
+  ];
+
   // ─── Status labels used by the UI ────────────────────────────────
   static const String statusIdle = 'Idle';
   static const String statusRunning = 'Running';
   static const String statusDenied = 'Denied';
   static const String statusGranted = 'Granted';
 }
+

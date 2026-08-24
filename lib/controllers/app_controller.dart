@@ -13,6 +13,7 @@ import '../services/media_projection_service.dart';
 import '../services/ocr_service.dart';
 import '../services/overlay_service.dart';
 import '../services/permission_service.dart';
+import '../services/translation_model_manager.dart';
 import '../services/translation_service.dart';
 
 /// Lifecycle state of each pipeline stage, mirrored by the status cards.
@@ -24,6 +25,10 @@ enum ServiceStatus { idle, granted, denied, running, error }
 /// card state. The UI only reads this controller and calls its intents;
 /// it never touches MethodChannels directly.
 class AppController extends ChangeNotifier {
+  AppController() {
+    modelManager.addListener(_onModelManagerChanged);
+  }
+
   static const _tag = 'AppController';
 
   final PermissionService _permissions = PermissionService();
@@ -31,6 +36,9 @@ class AppController extends ChangeNotifier {
   final OverlayService _overlay = OverlayService();
   final OCRService _ocr = OCRService();
   final TranslationService _translation = TranslationService();
+
+  /// Dedicated model manager for translation model downloading & status.
+  final TranslationModelManager modelManager = TranslationModelManager();
 
   // ─── Pipeline statuses ───────────────────────────────────────────
   ServiceStatus screenCaptureStatus = ServiceStatus.idle;
@@ -49,7 +57,12 @@ class AppController extends ChangeNotifier {
   bool get capturePending => _capturePending;
 
   /// True while any stage is in flight (disables Start button).
-  bool get isBusy => _isTranslating || _capturePending || _ocrInProgress || _translationInProgress;
+  bool get isBusy =>
+      _isTranslating ||
+      _capturePending ||
+      _ocrInProgress ||
+      _translationInProgress ||
+      modelManager.isAnyDownloading;
 
   /// Last pipeline error, surfaced to the UI as a SnackBar message.
   String? lastError;
@@ -66,22 +79,18 @@ class AppController extends ChangeNotifier {
 
   // ─── OCR results (Step 7) ────────────────────────────────────────
   /// Structured text regions detected in [lastCapture].
-  ///
-  /// Populated immediately after a successful screen capture in the
-  /// same `startTranslation` pipeline. Empty list means either OCR ran
-  /// and found no readable Japanese text, or the stage has not been
-  /// reached yet (check [ocrStatus] to distinguish).
   List<TextBox> lastOcrResult = [];
 
   // ─── Translation results (Step 8) ────────────────────────────────
   /// Translated text boxes produced by the translation stage.
-  ///
-  /// Each entry pairs the original Japanese text with its Arabic
-  /// translation and preserves the bounding box coordinates from OCR.
   List<TranslatedTextBox> lastTranslationResult = [];
+
+  void _onModelManagerChanged() => notifyListeners();
 
   @override
   void dispose() {
+    modelManager.removeListener(_onModelManagerChanged);
+    modelManager.dispose();
     _ocr.dispose();
     _translation.dispose();
     super.dispose();
@@ -89,15 +98,15 @@ class AppController extends ChangeNotifier {
 
   // ─── Status sync ─────────────────────────────────────────────────
   /// Re-queries real native state. Safe to call on app init and resume —
-  /// this is what keeps the status cards honest after the user returns
-  /// from system permission screens.
+  /// this is what keeps the status cards and model badges honest.
   Future<void> refreshStatuses() async {
-    LoggerService.instance.log('Refreshing pipeline statuses', source: 'AppController');
+    LoggerService.instance.log('Refreshing pipeline and model statuses', source: 'AppController');
     final overlayGranted = await _overlay.checkOverlayPermission();
     overlayStatus =
         overlayGranted ? ServiceStatus.granted : ServiceStatus.idle;
     captureAvailable =
         await _mediaProjection.checkScreenCaptureAvailability();
+    await modelManager.checkAllStatuses();
     AppLogger.info(
       'refreshStatuses: overlayGranted=$overlayGranted '
       'captureAvailable=$captureAvailable',
@@ -105,6 +114,13 @@ class AppController extends ChangeNotifier {
     );
     notifyListeners();
   }
+
+  // ─── Model Management Delegations ────────────────────────────────
+  /// Downloads an individual model with safety and verification.
+  Future<bool> downloadModel(String code) => modelManager.downloadModel(code);
+
+  /// Downloads all missing required models sequentially.
+  Future<bool> downloadRequiredModels() => modelManager.downloadRequiredModels();
 
   // ─── Intents ─────────────────────────────────────────────────────
   /// Requests runtime permissions, then refreshes card state from truth.
@@ -116,38 +132,37 @@ class AppController extends ChangeNotifier {
   }
 
   /// Full Step 6 → Step 7 → Step 8 pipeline:
-  ///   Overlay permission check
-  ///   → MediaProjection consent dialog
-  ///   → Foreground service + single screenshot
-  ///   → PNG bytes decoded
-  ///   → Japanese OCR via ML Kit
-  ///   → Japanese → Arabic translation via ML Kit
-  ///   → **STOP** (no Overlay yet).
+  ///   1. Pre-flight model readiness check
+  ///   2. Overlay permission check
+  ///   3. MediaProjection consent dialog
+  ///   4. Foreground service + single screenshot
+  ///   5. PNG bytes decoded
+  ///   6. Japanese OCR via ML Kit
+  ///   7. Japanese → Arabic translation via ML Kit
+  ///   8. **STOP** (no Overlay yet).
   ///
-  /// After this method returns, callers can read:
-  ///   * [screenCaptureStatus] — screenshot outcome
-  ///   * [lastCapture] + [lastCapturePath] — raw image payload
-  ///   * [ocrStatus] — OCR outcome
-  ///   * [lastOcrResult] — structured list of detected text regions
-  ///   * [translationStatus] — translation outcome
-  ///   * [lastTranslationResult] — translated text boxes
-  ///
+  /// Fails immediately BEFORE Capture/OCR if required models are missing.
   /// Returns an error message for the UI SnackBar, or `null` on success.
   Future<String?> startTranslation() async {
     LoggerService.instance.log('Start Translation pressed', source: 'AppController');
     lastError = null;
 
-    // ── Per-stage lifecycle transitions (no bulk Idle reset) ─────────
-    //
-    // Design rule: leave "Granted" values from prior runs alone so the
-    // UI can surface last successful result. At the START of a new run,
-    // transition ONLY the stages that are *about* to execute:
-    //
-    //   [Start pressed]
-    //     screenCaptureStatus := Running   ← capture is about to begin
-    //     ocrStatus           := Idle      ← hasn't started yet (clear
-    //                                        any stale error from last run)
-    //     translationStatus   := Idle      ← hasn't started yet
+    // ── Pre-flight Check: Are required translation models installed? ─
+    final modelsReady = await modelManager.areAllRequiredModelsDownloaded();
+    if (!modelsReady) {
+      final missing = await modelManager.getMissingRequiredModelNames();
+      lastError = 'Missing required translation models: ${missing.join(', ')}. '
+          'Please download them in the Translation Models section.';
+      AppLogger.warning('startTranslation aborted: $lastError', tag: _tag);
+      LoggerService.instance.log(lastError!, source: _tag, level: 'WARN');
+      screenCaptureStatus = ServiceStatus.idle;
+      ocrStatus = ServiceStatus.idle;
+      translationStatus = ServiceStatus.idle;
+      notifyListeners();
+      return lastError;
+    }
+
+    // ── Per-stage lifecycle transitions ─────────────────────────────
     if (!isBusy) {
       screenCaptureStatus = ServiceStatus.running;
       ocrStatus = ServiceStatus.idle;
@@ -157,6 +172,7 @@ class AppController extends ChangeNotifier {
 
     if (!await _overlay.checkOverlayPermission()) {
       overlayStatus = ServiceStatus.idle;
+      screenCaptureStatus = ServiceStatus.idle;
       lastError = 'Grant "Display over other apps" first.';
       AppLogger.warning('startTranslation aborted: $lastError', tag: _tag);
       notifyListeners();
@@ -165,9 +181,6 @@ class AppController extends ChangeNotifier {
     overlayStatus = ServiceStatus.granted;
 
     _capturePending = true;
-    // Don't override screenCaptureStatus to Running again if it was
-    // already set above the overlay check (it was). Just make sure the
-    // UI reflects the new pending flag.
     if (screenCaptureStatus != ServiceStatus.running) {
       screenCaptureStatus = ServiceStatus.running;
     }
@@ -181,8 +194,6 @@ class AppController extends ChangeNotifier {
       lastCapturePath = await _saveTempCapture(bytes);
 
       // After capture SUCCESS:
-      //   screenCaptureStatus := Granted   ← image available
-      //   ocrStatus           := Running   ← OCR is about to begin
       screenCaptureStatus = ServiceStatus.granted;
       ocrStatus = ServiceStatus.running;
       _capturePending = false;
@@ -196,19 +207,9 @@ class AppController extends ChangeNotifier {
       // ── Step 7: Japanese OCR ────────────────────────────────────
       LoggerService.instance.log('Advancing pipeline to Step 7 (OCR)', source: 'AppController');
       _ocrInProgress = true;
-      // Note: ocrStatus already = Running from the post-capture transition
-      // above. We just notify once more here so OCR "started" is logged
-      // at the right moment in the UI.
       notifyListeners();
 
       try {
-        // Decode the PNG header to recover the real source dimensions.
-        // ML Kit's `block.boundingBox` is expressed in these pixels,
-        // so we must keep them alongside every [TextBox] for later
-        // overlay scaling in Step 9.
-        //
-        // Note: dart:ui's decodeImageFromList uses a callback in this
-        // Dart version, so we bridge it to a Future via Completer.
         final completer = Completer<Image>();
         decodeImageFromList(bytes, (Image img) {
           completer.complete(img);
@@ -229,9 +230,6 @@ class AppController extends ChangeNotifier {
           imageHeight: imgH,
         );
         lastOcrResult = boxes;
-        // After OCR SUCCESS:
-        //   ocrStatus := Granted
-        //   translationStatus := Running  ← translation is about to begin
         ocrStatus = ServiceStatus.granted;
         AppLogger.info(
           'Step 7 OCR OK: stored ${boxes.length} boxes in lastOcrResult',
@@ -252,9 +250,6 @@ class AppController extends ChangeNotifier {
         try {
           final translatedBoxes = await _translation.translateBoxes(boxes);
           lastTranslationResult = translatedBoxes;
-
-          // After Translation SUCCESS:
-          //   translationStatus := Granted
           translationStatus = ServiceStatus.granted;
           AppLogger.info(
             'Step 8 Translation OK: ${translatedBoxes.length} boxes translated',
@@ -318,13 +313,10 @@ class AppController extends ChangeNotifier {
     return lastError;
   }
 
-  /// Stops the pipeline: kills the capture service (a pending
-  /// screenshot then resolves as STOPPED) and hides the overlay.
+  /// Stops the pipeline: kills the capture service and hides the overlay.
   Future<void> stopTranslation() async {
     LoggerService.instance.log('Stop Translation pressed', source: 'AppController');
     if (!isBusy) {
-      // Reset in-progress stages to idle even if nothing is running, so
-      // tapping Stop always clears prior Granted/Error transient state.
       screenCaptureStatus = ServiceStatus.idle;
       ocrStatus = ServiceStatus.idle;
       translationStatus = ServiceStatus.idle;
