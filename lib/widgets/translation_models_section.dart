@@ -2,9 +2,11 @@ import 'package:flutter/material.dart';
 
 import '../controllers/app_controller.dart';
 import '../core/theme/app_theme.dart';
+import '../services/ocr_model_manager.dart';
 import '../services/translation_model_manager.dart';
 
-/// Card and list section for viewing and downloading translation models.
+/// Card and list section for viewing and downloading translation models
+/// as well as the Japanese OCR model.
 class TranslationModelsSection extends StatelessWidget {
   const TranslationModelsSection({
     super.key,
@@ -17,9 +19,14 @@ class TranslationModelsSection extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final modelManager = controller.modelManager;
+    final ocrModelManager = controller.ocrModelManager;
     final states = modelManager.states;
-    final hasMissingRequired = states.any((s) => s.config.isRequired && !s.isDownloaded);
-    final isAnyDownloading = modelManager.isAnyDownloading;
+    final ocrState = ocrModelManager.state;
+    final hasMissingRequired =
+        states.any((s) => s.config.isRequired && !s.isDownloaded);
+    final isAllReady = !hasMissingRequired && ocrState.isReady;
+    final isAnyDownloading =
+        modelManager.isAnyDownloading || ocrModelManager.isDownloading;
     final isBatchDownloading = modelManager.isBatchDownloading;
 
     return Card(
@@ -56,7 +63,7 @@ class TranslationModelsSection extends StatelessWidget {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        'نماذج الترجمة على الجهاز (On-Device)',
+                        'نماذج الترجمة والتعرف على الجهاز (On-Device)',
                         style: AppTheme.arabicText(
                           fontSize: 12,
                           color: theme.colorScheme.onSurfaceVariant,
@@ -65,18 +72,21 @@ class TranslationModelsSection extends StatelessWidget {
                     ],
                   ),
                 ),
-                if (!hasMissingRequired)
+                if (isAllReady)
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                     decoration: BoxDecoration(
                       color: Colors.green.withValues(alpha: 0.12),
                       borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.green.withValues(alpha: 0.4)),
+                      border:
+                          Border.all(color: Colors.green.withValues(alpha: 0.4)),
                     ),
                     child: const Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(Icons.check_circle_rounded, size: 14, color: Colors.green),
+                        Icon(Icons.check_circle_rounded,
+                            size: 14, color: Colors.green),
                         SizedBox(width: 4),
                         Text(
                           'Ready',
@@ -95,7 +105,17 @@ class TranslationModelsSection extends StatelessWidget {
             const Divider(height: 1),
             const SizedBox(height: 8),
 
-            // ── List of models ────────────────────────────────────────
+            // ── Japanese OCR Model Row ───────────────────────────────
+            _OcrModelRow(
+              state: ocrState,
+              isBusy: isAnyDownloading,
+              onPrepare: controller.prepareOCRModel,
+            ),
+            const SizedBox(height: 4),
+            const Divider(height: 1),
+            const SizedBox(height: 4),
+
+            // ── List of translation models ───────────────────────────
             ...states.map((state) {
               return _ModelRow(
                 state: state,
@@ -132,6 +152,215 @@ class TranslationModelsSection extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+class _OcrModelRow extends StatelessWidget {
+  const _OcrModelRow({
+    required this.state,
+    required this.isBusy,
+    required this.onPrepare,
+  });
+
+  final OCRModelState state;
+  final bool isBusy;
+  final VoidCallback onPrepare;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            alignment: Alignment.center,
+            child: Icon(
+              Icons.document_scanner_rounded,
+              size: 20,
+              color: theme.colorScheme.primary,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      'Japanese OCR',
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      '(التعرف على النص)',
+                      style: AppTheme.arabicText(
+                        fontSize: 12,
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 5,
+                        vertical: 1,
+                      ),
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.primaryContainer,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        'Required',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          fontSize: 10,
+                          color: theme.colorScheme.onPrimaryContainer,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 2),
+                if (state.isDownloading)
+                  Text(
+                    state.statusMessage ?? 'Preparing OCR model...',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.primary,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  )
+                else if (state.isFailed)
+                  Text(
+                    state.lastError ?? 'OCR model failed',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.error,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  )
+                else if (state.isReady)
+                  Text(
+                    'Ready for text recognition',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  )
+                else
+                  Text(
+                    'Google Play Services module pending',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          _buildAction(context),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAction(BuildContext context) {
+    final theme = Theme.of(context);
+
+    switch (state.status) {
+      case OCRModelStatus.ready:
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: Colors.green.withValues(alpha: 0.1),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: const Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.check_rounded,
+                size: 16,
+                color: Colors.green,
+              ),
+              SizedBox(width: 4),
+              Text(
+                'Ready',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.green,
+                ),
+              ),
+            ],
+          ),
+        );
+
+      case OCRModelStatus.downloading:
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.primaryContainer.withValues(alpha: 0.4),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: theme.colorScheme.primary,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                'Preparing...',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: theme.colorScheme.primary,
+                ),
+              ),
+            ],
+          ),
+        );
+
+      case OCRModelStatus.failed:
+        return OutlinedButton.icon(
+          style: OutlinedButton.styleFrom(
+            foregroundColor: theme.colorScheme.error,
+            side: BorderSide(color: theme.colorScheme.error),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            minimumSize: Size.zero,
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+          icon: const Icon(Icons.refresh_rounded, size: 14),
+          label: const Text('Retry', style: TextStyle(fontSize: 12)),
+          onPressed: isBusy ? null : onPrepare,
+        );
+
+      case OCRModelStatus.notReady:
+        return FilledButton.tonalIcon(
+          style: FilledButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            minimumSize: Size.zero,
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+          icon: const Icon(Icons.download_rounded, size: 14),
+          label: const Text('Prepare', style: TextStyle(fontSize: 12)),
+          onPressed: isBusy ? null : onPrepare,
+        );
+    }
   }
 }
 

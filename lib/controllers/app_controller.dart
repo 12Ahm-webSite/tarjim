@@ -10,6 +10,7 @@ import '../core/utils/logger_service.dart';
 import '../models/text_box.dart';
 import '../models/translated_text_box.dart';
 import '../services/media_projection_service.dart';
+import '../services/ocr_model_manager.dart';
 import '../services/ocr_service.dart';
 import '../services/overlay_service.dart';
 import '../services/permission_service.dart';
@@ -25,20 +26,38 @@ enum ServiceStatus { idle, granted, denied, running, error }
 /// card state. The UI only reads this controller and calls its intents;
 /// it never touches MethodChannels directly.
 class AppController extends ChangeNotifier {
-  AppController() {
+  AppController({
+    PermissionService? permissions,
+    MediaProjectionService? mediaProjection,
+    OverlayService? overlay,
+    OCRService? ocr,
+    TranslationService? translation,
+    TranslationModelManager? translationManager,
+    OCRModelManager? ocrManager,
+  })  : _permissions = permissions ?? PermissionService(),
+        _mediaProjection = mediaProjection ?? MediaProjectionService(),
+        _overlay = overlay ?? OverlayService(),
+        _ocr = ocr ?? OCRService(),
+        _translation = translation ?? TranslationService(),
+        modelManager = translationManager ?? TranslationModelManager(),
+        ocrModelManager = ocrManager ?? OCRModelManager() {
     modelManager.addListener(_onModelManagerChanged);
+    ocrModelManager.addListener(_onOcrModelManagerChanged);
   }
 
   static const _tag = 'AppController';
 
-  final PermissionService _permissions = PermissionService();
-  final MediaProjectionService _mediaProjection = MediaProjectionService();
-  final OverlayService _overlay = OverlayService();
-  final OCRService _ocr = OCRService();
-  final TranslationService _translation = TranslationService();
+  final PermissionService _permissions;
+  final MediaProjectionService _mediaProjection;
+  final OverlayService _overlay;
+  final OCRService _ocr;
+  final TranslationService _translation;
 
   /// Dedicated model manager for translation model downloading & status.
-  final TranslationModelManager modelManager = TranslationModelManager();
+  final TranslationModelManager modelManager;
+
+  /// Dedicated model manager for Japanese OCR model readiness & download.
+  final OCRModelManager ocrModelManager;
 
   // ─── Pipeline statuses ───────────────────────────────────────────
   ServiceStatus screenCaptureStatus = ServiceStatus.idle;
@@ -62,7 +81,8 @@ class AppController extends ChangeNotifier {
       _capturePending ||
       _ocrInProgress ||
       _translationInProgress ||
-      modelManager.isAnyDownloading;
+      modelManager.isAnyDownloading ||
+      ocrModelManager.isDownloading;
 
   /// Last pipeline error, surfaced to the UI as a SnackBar message.
   String? lastError;
@@ -86,11 +106,14 @@ class AppController extends ChangeNotifier {
   List<TranslatedTextBox> lastTranslationResult = [];
 
   void _onModelManagerChanged() => notifyListeners();
+  void _onOcrModelManagerChanged() => notifyListeners();
 
   @override
   void dispose() {
     modelManager.removeListener(_onModelManagerChanged);
+    ocrModelManager.removeListener(_onOcrModelManagerChanged);
     modelManager.dispose();
+    ocrModelManager.dispose();
     _ocr.dispose();
     _translation.dispose();
     super.dispose();
@@ -107,20 +130,25 @@ class AppController extends ChangeNotifier {
     captureAvailable =
         await _mediaProjection.checkScreenCaptureAvailability();
     await modelManager.checkAllStatuses();
+    await ocrModelManager.checkModelStatus();
     AppLogger.info(
       'refreshStatuses: overlayGranted=$overlayGranted '
-      'captureAvailable=$captureAvailable',
+      'captureAvailable=$captureAvailable '
+      'ocrReady=${ocrModelManager.isReady}',
       tag: _tag,
     );
     notifyListeners();
   }
 
   // ─── Model Management Delegations ────────────────────────────────
-  /// Downloads an individual model with safety and verification.
+  /// Downloads an individual translation model with safety and verification.
   Future<bool> downloadModel(String code) => modelManager.downloadModel(code);
 
-  /// Downloads all missing required models sequentially.
+  /// Downloads all missing required translation models sequentially.
   Future<bool> downloadRequiredModels() => modelManager.downloadRequiredModels();
+
+  /// Prepares and downloads the Japanese OCR optional model if not ready.
+  Future<bool> prepareOCRModel() => ocrModelManager.prepareOCRModel();
 
   // ─── Intents ─────────────────────────────────────────────────────
   /// Requests runtime permissions, then refreshes card state from truth.
@@ -132,24 +160,26 @@ class AppController extends ChangeNotifier {
   }
 
   /// Full Step 6 → Step 7 → Step 8 pipeline:
-  ///   1. Pre-flight model readiness check
-  ///   2. Overlay permission check
-  ///   3. MediaProjection consent dialog
-  ///   4. Foreground service + single screenshot
-  ///   5. PNG bytes decoded
-  ///   6. Japanese OCR via ML Kit
-  ///   7. Japanese → Arabic translation via ML Kit
-  ///   8. **STOP** (no Overlay yet).
+  ///   1. Pre-flight Check A: Translation models (JA → EN → AR)
+  ///   2. Pre-flight Check B: Japanese OCR model readiness
+  ///   3. Overlay permission check
+  ///   4. MediaProjection consent dialog + Foreground service
+  ///   5. Single screenshot capture
+  ///   6. PNG bytes decoded
+  ///   7. Japanese OCR via ML Kit
+  ///   8. Japanese → Arabic translation via ML Kit
+  ///   9. **STOP** (no Overlay yet).
   ///
-  /// Fails immediately BEFORE Capture/OCR if required models are missing.
+  /// Fails immediately BEFORE Capture/OCR if models are missing/not ready.
   /// Returns an error message for the UI SnackBar, or `null` on success.
   Future<String?> startTranslation() async {
     LoggerService.instance.log('Start Translation pressed', source: 'AppController');
     lastError = null;
 
-    // ── Pre-flight Check: Are required translation models installed? ─
-    final modelsReady = await modelManager.areAllRequiredModelsDownloaded();
-    if (!modelsReady) {
+    // ── Pre-flight Check A: Are required translation models installed? ─
+    final translationModelsReady =
+        await modelManager.areAllRequiredModelsDownloaded();
+    if (!translationModelsReady) {
       final missing = await modelManager.getMissingRequiredModelNames();
       lastError = 'Missing required translation models: ${missing.join(', ')}. '
           'Please download them in the Translation Models section.';
@@ -162,14 +192,21 @@ class AppController extends ChangeNotifier {
       return lastError;
     }
 
-    // ── Per-stage lifecycle transitions ─────────────────────────────
-    if (!isBusy) {
-      screenCaptureStatus = ServiceStatus.running;
+    // ── Pre-flight Check B: Is Japanese OCR model ready? ─────────────
+    final ocrReady = await ocrModelManager.isModelReady();
+    if (!ocrReady) {
+      lastError = 'Japanese OCR model is not ready. Google Play Services is downloading the optional module. '
+          'Please tap "Prepare OCR Model" or wait a moment for the download to complete.';
+      AppLogger.warning('startTranslation aborted: $lastError', tag: _tag);
+      LoggerService.instance.log(lastError!, source: _tag, level: 'WARN');
+      screenCaptureStatus = ServiceStatus.idle;
       ocrStatus = ServiceStatus.idle;
       translationStatus = ServiceStatus.idle;
       notifyListeners();
+      return lastError;
     }
 
+    // ── Pre-flight Check C: Overlay permission ───────────────────────
     if (!await _overlay.checkOverlayPermission()) {
       overlayStatus = ServiceStatus.idle;
       screenCaptureStatus = ServiceStatus.idle;
@@ -179,6 +216,14 @@ class AppController extends ChangeNotifier {
       return lastError;
     }
     overlayStatus = ServiceStatus.granted;
+
+    // ── Per-stage lifecycle transitions ─────────────────────────────
+    if (!isBusy) {
+      screenCaptureStatus = ServiceStatus.running;
+      ocrStatus = ServiceStatus.idle;
+      translationStatus = ServiceStatus.idle;
+      notifyListeners();
+    }
 
     _capturePending = true;
     if (screenCaptureStatus != ServiceStatus.running) {

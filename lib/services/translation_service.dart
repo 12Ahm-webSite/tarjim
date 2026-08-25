@@ -24,24 +24,33 @@ import '../models/translated_text_box.dart';
 /// The caller ([AppController]) is responsible for ensuring only one
 /// `translateBoxes` call is active at a time via `_translationInProgress`.
 class TranslationService {
+  TranslationService({
+    OnDeviceTranslatorModelManager? modelManager,
+    OnDeviceTranslator? jaToEn,
+    OnDeviceTranslator? enToAr,
+  })  : _modelManager = modelManager ?? OnDeviceTranslatorModelManager(),
+        _jaToEn = jaToEn ??
+            OnDeviceTranslator(
+              sourceLanguage: TranslateLanguage.japanese,
+              targetLanguage: TranslateLanguage.english,
+            ),
+        _enToAr = enToAr ??
+            OnDeviceTranslator(
+              sourceLanguage: TranslateLanguage.english,
+              targetLanguage: TranslateLanguage.arabic,
+            );
+
   static const _tag = 'TranslationService';
 
   // ── Two-step translators ───────────────────────────────────────────
   /// Step 1: Japanese → English
-  late final OnDeviceTranslator _jaToEn = OnDeviceTranslator(
-    sourceLanguage: TranslateLanguage.japanese,
-    targetLanguage: TranslateLanguage.english,
-  );
+  final OnDeviceTranslator _jaToEn;
 
   /// Step 2: English → Arabic
-  late final OnDeviceTranslator _enToAr = OnDeviceTranslator(
-    sourceLanguage: TranslateLanguage.english,
-    targetLanguage: TranslateLanguage.arabic,
-  );
+  final OnDeviceTranslator _enToAr;
 
   /// Model manager used strictly for checking local model availability.
-  final OnDeviceTranslatorModelManager _modelManager =
-      OnDeviceTranslatorModelManager();
+  final OnDeviceTranslatorModelManager _modelManager;
 
   bool _disposed = false;
 

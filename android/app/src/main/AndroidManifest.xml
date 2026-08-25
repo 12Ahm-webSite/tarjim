@@ -47,6 +47,11 @@
             android:name=".services.OverlayService"
             android:exported="false" />
 
+        <!-- Automatically download ML Kit OCR Japanese optional module on install -->
+        <meta-data
+            android:name="com.google.ml.vision.DEPENDENCIES"
+            android:value="ocr,ocr_japanese" />
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

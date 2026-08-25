@@ -1,4 +1,3 @@
-
 import 'dart:async';
 import 'dart:io';
 
@@ -16,18 +15,23 @@ import '../models/text_box.dart';
 /// with source-image pixel coordinates, suitable for Step 8 (translation)
 /// and Step 9 (overlay placement).
 ///
+/// **Design Rule**: This service is a pure recognition pipeline and MUST NEVER
+/// attempt model downloading or download-waiting retry loops. OCR model
+/// readiness is verified beforehand by [OCRModelManager].
+///
 /// This service is intentionally side-effect free: it does not touch any
 /// MethodChannels and does not hold UI state — the controller owns state.
 class OCRService {
+  OCRService({
+    TextRecognizer? recognizer,
+  }) : _recognizer = recognizer ??
+            TextRecognizer(script: TextRecognitionScript.japanese);
+
   static const _tag = 'OCRService';
 
   /// Japanese script recognizer — the correct script identifier is the
   /// single most important configuration for reading manga speech bubbles.
-  /// Using [TextRecognitionScript.latin] here would produce garbage for
-  /// hiragana/katakana/kanji text.
-  late final TextRecognizer _recognizer = TextRecognizer(
-    script: TextRecognitionScript.japanese,
-  );
+  final TextRecognizer _recognizer;
 
   bool _disposed = false;
 
@@ -59,17 +63,7 @@ class OCRService {
   /// bounding box `top`, then left-to-right by `left` — i.e. natural
   /// reading order for a page with mixed horizontal dialogue.
   ///
-  /// ### ML Kit first-run model download handling
-  ///
-  /// The Japanese text-recognition model is an **optional Play Services
-  /// module**. On the very first run the underlying service throws a
-  /// `PlatformException(TextRecognizerError, "Waiting for the text
-  /// optional module to be downloaded")` for a few seconds while the
-  /// package manager pulls the model. We treat this transient error
-  /// specially: log a "Preparing OCR model…" notice and retry up to
-  /// [_maxModelDownloadRetries] with a short sleep between attempts,
-  /// so the pipeline succeeds on the same run instead of surfacing a
-  /// hard failure to the user.
+  /// Throws immediately if OCR recognition fails or model is missing.
   Future<List<TextBox>> processImage({
     Uint8List? bytes,
     String? filePath,
@@ -97,8 +91,6 @@ class OCRService {
 
     try {
       // ── Stage 2: Input image loaded ──────────────────────────────
-      // Prepared ONCE before the retry loop (file bytes don't change
-      // between model-download retries).
       final InputImage inputImage = _buildInputImage(
         filePath: filePath,
         bytes: bytes,
@@ -107,79 +99,14 @@ class OCRService {
       );
       AppLogger.info('OCR InputImage prepared', tag: _tag);
 
-      // ── Stage 3: Text recognition with optional-model retry loop ─
-      const int maxModelDownloadRetries = 3;
-      const Duration retryDelay = Duration(seconds: 2);
-      RecognizedText? result;
-      PlatformException? lastException;
+      // ── Stage 3: Pure text recognition ────────────────────────────
+      LoggerService.instance.log(
+        'OCR text recognition started (Japanese script)',
+        source: _tag,
+      );
+      AppLogger.info('OCR processImage() call to ML Kit recognizer', tag: _tag);
 
-      for (int attempt = 0; attempt <= maxModelDownloadRetries; attempt++) {
-        if (attempt > 0) {
-          LoggerService.instance.log(
-            'Preparing OCR model… retrying in $retryDelay (attempt $attempt/$maxModelDownloadRetries)',
-            source: _tag,
-          );
-          AppLogger.info(
-            'OCR model not yet available — waiting ${retryDelay.inSeconds}s '
-            'before retry $attempt/$maxModelDownloadRetries',
-            tag: _tag,
-          );
-          await Future.delayed(retryDelay);
-          LoggerService.instance.log(
-            'OCR text recognition retry started (attempt $attempt/$maxModelDownloadRetries, Japanese script)',
-            source: _tag,
-          );
-        } else {
-          LoggerService.instance.log(
-            'OCR text recognition started (Japanese script)',
-            source: _tag,
-          );
-        }
-        AppLogger.info(
-          'OCR processImage() call to ML Kit recognizer (attempt=$attempt)',
-          tag: _tag,
-        );
-
-        try {
-          result = await _recognizer.processImage(inputImage);
-          lastException = null;
-          break; // success
-        } on PlatformException catch (e) {
-          lastException = e;
-          final bool isTransientModelDownload =
-              e.code == 'TextRecognizerError' &&
-                  (e.message ?? '').contains('optional module to be downloaded');
-          if (!isTransientModelDownload) rethrow;
-          if (attempt >= maxModelDownloadRetries) {
-            LoggerService.instance.log(
-              'OCR model still not ready after $maxModelDownloadRetries retries → failing',
-              source: _tag,
-            );
-            AppLogger.warning(
-              'OCR model download timed out after $maxModelDownloadRetries retries',
-              tag: _tag,
-            );
-            rethrow;
-          }
-          // Loop again → delay → retry
-        }
-      }
-
-      if (result == null) {
-        // Defensive: loop exited without producing a result and without
-        // rethrowing. Re-throw the last captured exception to avoid
-        // silently returning null.
-        if (lastException != null) {
-          // `PlatformException` does not expose `.stackTrace` as a public
-          // getter on every Flutter version. Since we are re-throwing a
-          // freshly constructed error, we capture the current stack
-          // trace (which preserves the Dart-side call chain of
-          // `processImage`) and attach it manually.
-          // ignore: only_throw_errors
-          throw lastException;
-        }
-        throw StateError('OCR processImage produced null result unexpectedly');
-      }
+      final RecognizedText result = await _recognizer.processImage(inputImage);
 
       // ── Stage 4–6: Aggregate metrics ────────────────────────────
       final List<TextBox> boxes = [];
@@ -235,19 +162,19 @@ class OCRService {
       );
       AppLogger.info(
         'OCR intermediate stats: blocks=${result.blocks.length} '
-        'emitted-boxes=$boxes.length lines=$totalLines chars=$totalChars',
+        'emitted-boxes=${boxes.length} lines=$totalLines chars=$totalChars',
         tag: _tag,
       );
 
       // ── Stage 7: OCR completed ──────────────────────────────────
       stopwatch.stop();
       LoggerService.instance.log(
-        'OCR completed in ${stopwatch.elapsedMilliseconds}ms → $boxes.length boxes, $totalChars chars',
+        'OCR completed in ${stopwatch.elapsedMilliseconds}ms → ${boxes.length} boxes, $totalChars chars',
         source: _tag,
       );
       AppLogger.info(
         'OCR completed in ${stopwatch.elapsedMilliseconds}ms: '
-        '$boxes.length boxes / $totalLines lines / $totalChars chars',
+        '${boxes.length} boxes / $totalLines lines / $totalChars chars',
         tag: _tag,
       );
 
@@ -274,9 +201,7 @@ class OCRService {
 
   // ── Helpers ────────────────────────────────────────────────────────
 
-  /// Builds the ML Kit [InputImage] once. Extracted so the retry loop
-  /// above can re-invoke `processImage()` repeatedly without
-  /// re-reading files or re-computing metadata.
+  /// Builds the ML Kit [InputImage] from file path or bytes.
   InputImage _buildInputImage({
     required String? filePath,
     required Uint8List? bytes,
