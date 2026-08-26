@@ -6,6 +6,14 @@ workflows:
     environment:
       flutter: stable
     scripts:
+      - name: Download Offline ONNX Models
+        script: |
+          mkdir -p assets/models/en_ar
+          echo "Downloading encoder_model.onnx..."
+          curl -L -f --retry 3 -o assets/models/en_ar/encoder_model.onnx https://huggingface.co/onnx-community/opus-mt-en-ar/resolve/main/onnx/encoder_model_int8.onnx
+          echo "Downloading decoder_model.onnx..."
+          curl -L -f --retry 3 -o assets/models/en_ar/decoder_model.onnx https://huggingface.co/onnx-community/opus-mt-en-ar/resolve/main/onnx/decoder_model_int8.onnx
+          ls -lh assets/models/en_ar
       - name: Get Flutter packages
         script: |
           flutter packages pub get

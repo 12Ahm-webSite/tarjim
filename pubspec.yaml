@@ -40,6 +40,8 @@ dependencies:
   flutter_overlay_window: ^0.5.0
   google_fonts: ^6.3.2
   flutter_svg: ^2.0.8
+  path_provider: ^2.1.5
+  onnxruntime: 1.4.1
 
 dev_dependencies:
   flutter_test:
@@ -65,6 +67,7 @@ flutter:
   assets:
     - assets/images/tarjimLogo.svg
     - assets/images/tarjimLogo.png
+    - assets/models/en_ar/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

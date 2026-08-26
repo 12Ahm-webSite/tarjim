@@ -14,6 +14,7 @@ import '../widgets/translation_models_section.dart';
 import '../widgets/translation_overlay.dart';
 import 'permissions_screen.dart';
 import 'settings_screen.dart';
+import 'offline_translation_poc_screen.dart';
 
 /// Main dashboard: pipeline status cards + primary actions.
 ///
@@ -101,6 +102,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       appBar: AppBar(
         title: const Text(AppConstants.appName),
         actions: [
+          IconButton(
+            tooltip: 'Offline PoC',
+            icon: const Icon(Icons.science_rounded),
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const OfflineTranslationPocScreen()),
+            ),
+          ),
           IconButton(
             tooltip: 'Settings',
             icon: const Icon(Icons.settings_rounded),
